@@ -163,9 +163,10 @@ def log_event(message):
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
 # --- BROWSER & FLASK SETUP ---
-# --- REMOVED find_chromium_executable() function as it's not needed and caused the issue ---
-
 def setup_driver():
+    """
+    Initializes the Selenium WebDriver, allowing it to find the browser automatically.
+    """
     print("Launching headless browser with performance flags...")
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -178,8 +179,9 @@ def setup_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    # --- FIX --- The following line has been removed to let Selenium find the browser automatically.
-    # chrome_options.binary_location = find_chromium_executable()
+    
+    # The line that set 'binary_location' has been removed.
+    # Selenium will now find the installed Chrome/Chromium browser automatically.
     return webdriver.Chrome(options=chrome_options)
 
 flask_app = Flask('')
