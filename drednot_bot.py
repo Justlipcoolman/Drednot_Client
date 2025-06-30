@@ -1,4 +1,4 @@
-# drednot_bot.py (Faster Version with Advanced Spam Detection)
+# drednot_bot.py (Corrected Version)
 
 import os
 import re
@@ -163,10 +163,7 @@ def log_event(message):
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
 # --- BROWSER & FLASK SETUP ---
-def find_chromium_executable():
-    path = shutil.which('chromium') or shutil.which('chromium-browser')
-    if path: return path
-    raise FileNotFoundError("Could not find chromium or chromium-browser.")
+# --- REMOVED find_chromium_executable() function as it's not needed and caused the issue ---
 
 def setup_driver():
     print("Launching headless browser with performance flags...")
@@ -181,7 +178,8 @@ def setup_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    chrome_options.binary_location = find_chromium_executable()
+    # --- FIX --- The following line has been removed to let Selenium find the browser automatically.
+    # chrome_options.binary_location = find_chromium_executable()
     return webdriver.Chrome(options=chrome_options)
 
 flask_app = Flask('')
