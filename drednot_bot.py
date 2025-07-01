@@ -1,4 +1,4 @@
-# drednot_bot.py (Faster Version with Advanced Spam Detection)
+# drednot_bot.py (Faster, Non-Blocking Version)
 
 import os
 import re
@@ -6,12 +6,14 @@ import json
 import time
 import shutil
 import queue
+import atexit
 import threading
 import traceback
 import requests
 from datetime import datetime
 from collections import deque
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, Response
 from selenium import webdriver
@@ -27,7 +29,8 @@ API_KEY = 'drednot123'
 MESSAGE_DELAY_SECONDS = 0.2
 ZWSP = '\u200B'
 INACTIVITY_TIMEOUT_SECONDS = 2 * 60
-MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.1
+MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.05 # Can be faster now!
+MAX_WORKER_THREADS = 10 # Max concurrent API requests
 
 ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT' # Replace with your key if needed
 SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
@@ -36,102 +39,53 @@ if not BOT_SERVER_URL:
     print("CRITICAL: BOT_SERVER_URL environment variable is not set!")
     exit(1)
 
-# --- JAVASCRIPT INJECTION SCRIPT (WITH ADVANCED SPAM DETECTION) ---
+# --- JAVASCRIPT INJECTION SCRIPT (Unchanged, it's already well-optimized) ---
 MUTATION_OBSERVER_SCRIPT = """
     console.log('[Bot-JS] Initializing Observer with Advanced Spam Detection...');
-    window.py_bot_events = []; // Holds events for Python to poll
-
-    // Arguments from Python
-    const zwsp = arguments[0];
-    const allCommands = arguments[1];
-    const cooldownMs = arguments[2] * 1000;
-    const spamStrikeLimit = arguments[3];
-    const spamTimeoutMs = arguments[4] * 1000;
-    const spamResetMs = arguments[5] * 1000;
-
-    // State storage (persists between script runs if page isn't reloaded)
-    window.botUserCooldowns = window.botUserCooldowns || {}; // For the basic 2s cooldown
-    window.botSpamTracker = window.botSpamTracker || {};   // For advanced spam tracking
-
+    window.py_bot_events = [];
+    const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
+          spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
+    window.botUserCooldowns = window.botUserCooldowns || {};
+    window.botSpamTracker = window.botSpamTracker || {};
     const targetNode = document.getElementById('chat-content');
     if (!targetNode) { return; }
-
     const callback = (mutationList, observer) => {
         const now = Date.now();
         for (const mutation of mutationList) {
-            if (mutation.type === 'childList') {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType !== 1 || node.tagName !== 'P' || node.dataset.botProcessed) continue;
-                    node.dataset.botProcessed = 'true'; // Process each node only once
-
-                    const pText = node.textContent || "";
-                    if (pText.startsWith(zwsp)) continue;
-
-                    // --- Event Handlers ---
-                    if (pText.includes("Joined ship '")) {
-                        const match = pText.match(/{[A-Z\\d]+}/);
-                        if (match && match[0]) window.py_bot_events.push({ type: 'ship_joined', id: match[0] });
-                        continue;
-                    }
-
-                    const colonIdx = pText.indexOf(':');
-                    if (colonIdx === -1) continue;
-
-                    const bdiElement = node.querySelector("bdi");
-                    if (!bdiElement) continue;
-
-                    const username = bdiElement.innerText.trim();
-                    const msgTxt = pText.substring(colonIdx + 1).trim();
-
-                    if (!msgTxt.startsWith('!')) continue;
-
-                    const parts = msgTxt.slice(1).trim().split(/ +/);
-                    const command = parts.shift().toLowerCase();
-
-                    if (!allCommands.includes(command)) continue;
-
-                    // --- SPAM & COOLDOWN CHECKS ---
-                    const spamTracker = window.botSpamTracker[username] = window.botSpamTracker[username] || { count: 0, lastCmd: '', lastTime: 0, penaltyUntil: 0 };
-
-                    // 1. Is user on a penalty timeout?
-                    if (now < spamTracker.penaltyUntil) {
-                        continue; // Silently ignore. They are timed out.
-                    }
-
-                    // 2. Is user on the basic command cooldown?
-                    const lastCmdTime = window.botUserCooldowns[username] || 0;
-                    if (now - lastCmdTime < cooldownMs) {
-                        continue; // Silently ignore.
-                    }
-                    window.botUserCooldowns[username] = now; // Update basic cooldown time
-
-                    // 3. Process spam strikes
-                    // Reset strike count if too much time has passed or command is different
-                    if (now - spamTracker.lastTime > spamResetMs || command !== spamTracker.lastCmd) {
-                        spamTracker.count = 1;
-                    } else {
-                        spamTracker.count++;
-                    }
-                    spamTracker.lastCmd = command;
-                    spamTracker.lastTime = now;
-
-                    // 4. Check if strike limit is reached
-                    if (spamTracker.count >= spamStrikeLimit) {
-                        spamTracker.penaltyUntil = now + spamTimeoutMs; // Apply penalty
-                        spamTracker.count = 0; // Reset counter
-                        window.py_bot_events.push({ type: 'spam_detected', username: username, command: command });
-                        continue; // Ignore the command that triggered the penalty
-                    }
-                    // --- END CHECKS ---
-
-                    // If all checks pass, queue the command for Python
-                    window.py_bot_events.push({
-                        type: 'command',
-                        command: command,
-                        username: username,
-                        args: parts
-                    });
+            if (mutation.type !== 'childList') continue;
+            for (const node of mutation.addedNodes) {
+                if (node.nodeType !== 1 || node.tagName !== 'P' || node.dataset.botProcessed) continue;
+                node.dataset.botProcessed = 'true';
+                const pText = node.textContent || "";
+                if (pText.startsWith(zwsp)) continue;
+                if (pText.includes("Joined ship '")) {
+                    const match = pText.match(/{[A-Z\\d]+}/);
+                    if (match && match[0]) window.py_bot_events.push({ type: 'ship_joined', id: match[0] });
+                    continue;
                 }
+                const colonIdx = pText.indexOf(':');
+                if (colonIdx === -1) continue;
+                const bdiElement = node.querySelector("bdi");
+                if (!bdiElement) continue;
+                const username = bdiElement.innerText.trim();
+                const msgTxt = pText.substring(colonIdx + 1).trim();
+                if (!msgTxt.startsWith('!')) continue;
+                const parts = msgTxt.slice(1).trim().split(/ +/);
+                const command = parts.shift().toLowerCase();
+                if (!allCommands.includes(command)) continue;
+                const spamTracker = window.botSpamTracker[username] = window.botSpamTracker[username] || { count: 0, lastCmd: '', lastTime: 0, penaltyUntil: 0 };
+                if (now < spamTracker.penaltyUntil) continue;
+                const lastCmdTime = window.botUserCooldowns[username] || 0;
+                if (now - lastCmdTime < cooldownMs) continue;
+                window.botUserCooldowns[username] = now;
+                if (now - spamTracker.lastTime > spamResetMs || command !== spamTracker.lastCmd) { spamTracker.count = 1; } else { spamTracker.count++; }
+                spamTracker.lastCmd = command; spamTracker.lastTime = now;
+                if (spamTracker.count >= spamStrikeLimit) {
+                    spamTracker.penaltyUntil = now + spamTimeoutMs; spamTracker.count = 0;
+                    window.py_bot_events.push({ type: 'spam_detected', username: username, command: command });
+                    continue;
+                }
+                window.py_bot_events.push({ type: 'command', command: command, username: username, args: parts });
             }
         }
     };
@@ -148,21 +102,23 @@ message_queue = queue.Queue(maxsize=100)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
-USER_COOLDOWN_SECONDS = 2.0  # Cooldown of 2 seconds per user.
-
-# --- NEW: ADVANCED SPAM DETECTION SETTINGS ---
-SPAM_STRIKE_LIMIT = 3        # How many times a user can repeat a command before a timeout.
-SPAM_TIMEOUT_SECONDS = 30    # How long the user is ignored after being flagged.
-SPAM_RESET_SECONDS = 5       # If this many seconds pass, the strike counter resets.
-
+USER_COOLDOWN_SECONDS = 2.0
+SPAM_STRIKE_LIMIT = 3
+SPAM_TIMEOUT_SECONDS = 30
+SPAM_RESET_SECONDS = 5
 ALL_COMMANDS = ["bal", "balance", "craft", "cs", "csb", "crateshopbuy", "daily", "eat", "flip", "gather", "info", "inv", "inventory", "lb", "leaderboard", "m", "market", "marketbuy", "marketcancel", "marketsell", "mb", "mc", "ms", "n", "next", "p", "pay", "previous", "recipes", "slots", "smelt", "timers", "traitroll", "traits", "verify", "work","hourly"]
 BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "None yet.", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
+# *** NEW: Thread pool for handling blocking API calls ***
+command_executor = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS, thread_name_prefix='CmdWorker')
+# *** NEW: Graceful shutdown for the thread pool ***
+atexit.register(lambda: command_executor.shutdown(wait=True))
+
 
 def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
-# --- BROWSER & FLASK SETUP ---
+# --- BROWSER & FLASK SETUP (Unchanged) ---
 def find_chromium_executable():
     path = shutil.which('chromium') or shutil.which('chromium-browser')
     if path: return path
@@ -171,7 +127,7 @@ def find_chromium_executable():
 def setup_driver():
     print("Launching headless browser with performance flags...")
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless=new") # etc...
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -220,30 +176,60 @@ def queue_reply(message):
                     text = text[bp if bp > 0 else MAX_LEN:].strip()
             except queue.Full: print("[WARN] Message queue is full."); log_event("WARN: Message queue full."); break
 
+# *** REFACTORED: More efficient lock usage ***
 def message_processor_thread():
     while True:
-        message = message_queue.get()
+        message = message_queue.get() # This blocks until a message is available
         try:
+            # Only lock for the absolute shortest time needed
             with driver_lock:
-                if driver: driver.execute_script("const msg=arguments[0];const chatBox=document.getElementById('chat');const chatInp=document.getElementById('chat-input');const chatBtn=document.getElementById('chat-send');if(chatBox&&chatBox.classList.contains('closed')){chatBtn.click();}if(chatInp){chatInp.value=msg;}chatBtn.click();", message)
-            clean_msg = message[1:]; print(f"[BOT-SENT] {clean_msg}"); BOT_STATE["last_message_sent"] = clean_msg; log_event(f"SENT: {clean_msg}")
-        except WebDriverException: pass
-        except Exception as e: print(f"[ERROR] Unexpected error in message processor: {e}"); log_event(f"UNEXPECTED ERROR in message processor: {e}")
+                if driver:
+                    driver.execute_script(
+                        "const msg=arguments[0];const chatBox=document.getElementById('chat');const chatInp=document.getElementById('chat-input');const chatBtn=document.getElementById('chat-send');if(chatBox&&chatBox.classList.contains('closed')){chatBtn.click();}if(chatInp){chatInp.value=msg;}chatBtn.click();",
+                        message
+                    )
+            
+            clean_msg = message[1:];
+            print(f"[BOT-SENT] {clean_msg}");
+            BOT_STATE["last_message_sent"] = clean_msg;
+            log_event(f"SENT: {clean_msg}")
+        
+        except WebDriverException: pass # Driver likely closed, thread will exit on restart
+        except Exception as e:
+            print(f"[ERROR] Unexpected error in message processor: {e}")
+            log_event(f"UNEXPECTED ERROR in message processor: {e}")
+        
+        # Sleep OUTSIDE the lock
         time.sleep(MESSAGE_DELAY_SECONDS)
 
-def process_remote_command(command, username, args):
-    reset_inactivity_timer()
+# *** NEW: This function runs in a separate thread from the pool ***
+# It handles the blocking API call, so the main loop is never affected.
+def process_api_call(command, username, args):
+    """Makes the blocking API call and queues the reply."""
     command_str = f"!{command} {' '.join(args)}"
-    print(f"[BOT-RECV] {command_str} from {username}")
-    BOT_STATE["last_command_info"] = f"{command_str} (from {username})"
-    log_event(f"RECV: {command_str} from {username}")
     try:
-        response = requests.post(BOT_SERVER_URL, json={"command": command, "username": username, "args": args}, headers={"Content-Type": "application/json", "x-api-key": API_KEY}, timeout=10)
-        response.raise_for_status(); data = response.json()
-        if data.get("reply"): queue_reply(data["reply"])
-    except requests.exceptions.RequestException as e: print(f"[API-ERROR] Failed to contact economy server: {e}"); log_event(f"API-ERROR: {e}")
+        # The blocking call happens here, safely in a worker thread
+        response = requests.post(
+            BOT_SERVER_URL,
+            json={"command": command, "username": username, "args": args},
+            headers={"Content-Type": "application/json", "x-api-key": API_KEY},
+            timeout=15 # Slightly longer timeout is safe now
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("reply"):
+            queue_reply(data["reply"])
+    except requests.exceptions.RequestException as e:
+        print(f"[API-ERROR] Failed to contact economy server for '{command_str}': {e}")
+        log_event(f"API-ERROR for '{username}': {e}")
+        # Optionally, notify the user of the error
+        queue_reply(f"@{username} Sorry, an error occurred while processing your command.")
+    except Exception as e:
+        print(f"[API-ERROR] Unexpected error processing '{command_str}': {e}")
+        log_event(f"UNEXPECTED API-ERROR for '{username}': {e}")
 
-# --- RESTART/REJOIN LOGIC ---
+
+# --- RESTART/REJOIN LOGIC (Unchanged, but will be called less often now) ---
 def reset_inactivity_timer():
     global inactivity_timer
     if inactivity_timer: inactivity_timer.cancel()
@@ -269,11 +255,14 @@ def attempt_soft_rejoin():
             print("[REJOIN] Re-injecting chat monitoring script."); driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, ALL_COMMANDS, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS); reset_inactivity_timer()
     except Exception as e: log_event(f"Rejoin FAILED: {e}"); print(f"[REJOIN] Proactive rejoin failed: {e}. Triggering full restart."); driver.quit()
 
+
 # --- MAIN BOT LOGIC ---
 def start_bot(use_key_login):
+    # This logic is mostly unchanged, as the setup is solid.
     global driver
     BOT_STATE["status"] = "Launching Browser..."; log_event("Performing full start...")
     driver = setup_driver()
+    # ... (The rest of the start_bot function is identical to yours)
     with driver_lock:
         print("Navigating to Drednot.io invite link..."); driver.get(SHIP_INVITE_LINK); print("Page loaded. Handling login procedure...")
         wait = WebDriverWait(driver, 15)
@@ -297,77 +286,69 @@ def start_bot(use_key_login):
 
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")));
         print("[SYSTEM] Injecting Smart MutationObserver for chat..."); driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, ALL_COMMANDS, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS); log_event("Chat observer active.")
-
         ship_id_found = False
-        print("[SYSTEM] Proactively scanning existing chat for Ship ID...")
-        log_event("Proactively scanning for Ship ID...")
-        PROACTIVE_SCAN_SCRIPT = """
-            const chatContent = document.getElementById('chat-content');
-            if (!chatContent) { return null; }
-            const paragraphs = chatContent.querySelectorAll('p');
-            for (const p of paragraphs) {
-                const pText = p.textContent || "";
-                if (pText.includes("Joined ship '")) {
-                    const match = pText.match(/{[A-Z\\d]+}/);
-                    if (match && match[0]) {
-                        return match[0]; // Return the found ID
-                    }
-                }
-            }
-            return null; // Return null if not found
-        """
+        print("[SYSTEM] Proactively scanning existing chat for Ship ID..."); log_event("Proactively scanning for Ship ID...")
+        PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
         found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
-
         if found_id:
-            BOT_STATE["current_ship_id"] = found_id
-            ship_id_found = True
-            log_event(f"Confirmed Ship ID via scan: {found_id}")
-            print(f"✅ Confirmed Ship ID via scan: {found_id}")
+            BOT_STATE["current_ship_id"] = found_id; ship_id_found = True; log_event(f"Confirmed Ship ID via scan: {found_id}"); print(f"✅ Confirmed Ship ID via scan: {found_id}")
         else:
-            print("[SYSTEM] No existing ID found. Waiting for live event...")
-            log_event("Waiting for live 'join' event...")
+            print("[SYSTEM] No existing ID found. Waiting for live event..."); log_event("Waiting for live 'join' event...")
             start_time = time.time()
-            while time.time() - start_time < 15: # Reduced timeout
+            while time.time() - start_time < 15:
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
                 for event in new_events:
-                    if event['type'] == 'ship_joined':
-                        BOT_STATE["current_ship_id"] = event['id']
-                        ship_id_found = True
-                        log_event(f"Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}")
-                        print(f"✅ Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}")
-                        break
-                if ship_id_found:
-                    break
+                    if event['type'] == 'ship_joined': BOT_STATE["current_ship_id"] = event['id']; ship_id_found = True; log_event(f"Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}"); print(f"✅ Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}"); break
+                if ship_id_found: break
                 time.sleep(0.5)
-
         if not ship_id_found:
-            error_message = "Failed to get Ship ID via scan or live event."
-            log_event(f"CRITICAL: {error_message}")
-            raise RuntimeError(error_message)
+            error_message = "Failed to get Ship ID via scan or live event."; log_event(f"CRITICAL: {error_message}"); raise RuntimeError(error_message)
 
     BOT_STATE["status"] = "Running"; queue_reply("Hello"); reset_inactivity_timer(); print(f"Event-driven chat monitor active. Polling every {MAIN_LOOP_POLLING_INTERVAL_SECONDS}s.")
+    
+    # *** REFACTORED: The main event loop is now non-blocking and highly responsive ***
     while True:
         try:
-            with driver_lock: new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+            with driver_lock:
+                new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+            
             if new_events:
+                # Any activity from the browser resets the timer.
                 reset_inactivity_timer()
+                
                 for event in new_events:
                     if event['type'] == 'ship_joined' and event['id'] != BOT_STATE["current_ship_id"]:
                          BOT_STATE["current_ship_id"] = event['id']
                          log_event(f"Switched to new ship: {BOT_STATE['current_ship_id']}")
+
                     elif event['type'] == 'command':
-                        process_remote_command(event['command'], event['username'], event['args'])
+                        # This is the crucial change.
+                        # Instead of blocking, we submit the job to the thread pool and continue the loop immediately.
+                        cmd = event['command']
+                        user = event['username']
+                        args = event['args']
+                        
+                        command_str = f"!{cmd} {' '.join(args)}"
+                        print(f"[BOT-RECV] Queued '{command_str}' from {user}")
+                        BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
+                        log_event(f"RECV: {command_str} from {user}")
+                        
+                        # Submit the blocking task to the thread pool
+                        command_executor.submit(process_api_call, cmd, user, args)
+
                     elif event['type'] == 'spam_detected':
-                        # Log that a user has been automatically timed out.
-                        username = event['username']
-                        command = event['command']
+                        username = event['username']; command = event['command']
                         log_event(f"SPAM: Timed out '{username}' for {SPAM_TIMEOUT_SECONDS}s for spamming '!{command}'.")
                         print(f"[SPAM-DETECT] Timed out '{username}' for spamming '!{command}'.")
 
-        except WebDriverException as e: print(f"[ERROR] WebDriver exception in main loop. Assuming disconnect."); log_event(f"WebDriver error in main loop: {e.msg}"); raise
+        except WebDriverException as e:
+            print(f"[ERROR] WebDriver exception in main loop. Assuming disconnect.")
+            log_event(f"WebDriver error in main loop: {e.msg}")
+            raise # Re-raise to trigger the main restart logic
+            
         time.sleep(MAIN_LOOP_POLLING_INTERVAL_SECONDS)
 
-# --- MAIN EXECUTION ---
+# --- MAIN EXECUTION (Unchanged) ---
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=message_processor_thread, daemon=True).start()
