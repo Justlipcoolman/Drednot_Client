@@ -55,7 +55,17 @@ if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set
 
 # --- JAVASCRIPT INJECTION SCRIPT (Unchanged) ---
 MUTATION_OBSERVER_SCRIPT = """
+    // --- IDEMPOTENT GUARD ---
+    // If the observer is already active on this page, do not inject a new one.
+    if (window.isDrednotBotObserverActive) {
+        console.log('[Bot-JS] Observer is already active. Skipping re-initialization.');
+        return; // Exit the script immediately
+    }
+    // Set a flag to indicate that the observer is now running.
+    window.isDrednotBotObserverActive = true;
     console.log('[Bot-JS] Initializing Observer with Advanced Spam Detection...');
+
+    // The rest of the script is unchanged
     window.py_bot_events = [];
     const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
           spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
@@ -107,6 +117,7 @@ MUTATION_OBSERVER_SCRIPT = """
     observer.observe(targetNode, { childList: true });
     console.log('[Bot-JS] Advanced Spam Detection is now active.');
 """
+
 
 class InvalidKeyError(Exception): pass
 
