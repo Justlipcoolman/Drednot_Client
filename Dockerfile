@@ -5,15 +5,12 @@ FROM python:3.11-slim
 # Set the working directory in the container
 WORKDIR /app
 
-# Install system dependencies required by Selenium and headless Chromium
-# This is the crucial step that installs the browser.
+# Install system dependencies.
+# Use 'chromium-driver' which is the correct package for 'chromium' on Debian.
+# The 'chromium' package automatically pulls in its required libraries.
 RUN apt-get update && apt-get install -y \
     chromium \
-    chromedriver \
-    libglib2.0-0 \
-    libnss3 \
-    libgconf-2-4 \
-    libfontconfig1 \
+    chromium-driver \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
