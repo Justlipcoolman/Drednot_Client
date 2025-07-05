@@ -1,7 +1,6 @@
 # drednot_bot.py
 # Final version, optimized for Render/Docker.
-# Anonymous key is hardcoded below for easy editing.
-# API_KEY and other configs are loaded from environment variables for security.
+# This version dynamically fetches the command list from the server.
 
 import os
 import queue
@@ -15,7 +14,7 @@ from datetime import datetime
 from collections import deque
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urljoin # NEW: Import urljoin for robust URL building
+from urllib.parse import urljoin 
 
 from flask import Flask, Response
 from selenium import webdriver
@@ -45,7 +44,9 @@ USER_COOLDOWN_SECONDS = 2.0
 SPAM_STRIKE_LIMIT = 3
 SPAM_TIMEOUT_SECONDS = 30
 SPAM_RESET_SECONDS = 5
-ALL_COMMANDS = ["commands", "bal", "balance", "craft", "cs", "csb", "crateshopbuy", "daily", "eat", "flip", "gather", "info", "inv", "inventory", "lb", "leaderboard", "m", "market", "marketbuy", "marketcancel", "marketsell", "mb", "mc", "ms", "n", "next", "p", "pay", "previous", "recipes", "slots", "smelt", "timers", "traitroll", "traits", "verify", "work", "hourly"]
+
+# REMOVED: The hardcoded ALL_COMMANDS list is no longer needed here.
+# ALL_COMMANDS = [...]
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -55,21 +56,16 @@ if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment v
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
 # --- JAVASCRIPT INJECTION SCRIPT (Unchanged) ---
+# It's important that this script now takes the command list as an argument
 MUTATION_OBSERVER_SCRIPT = """
-    // --- IDEMPOTENT GUARD ---
-    // If the observer is already active on this page, do not inject a new one.
-    if (window.isDrednotBotObserverActive) {
-        console.log('[Bot-JS] Observer is already active. Skipping re-initialization.');
-        return; // Exit the script immediately
-    }
-    // Set a flag to indicate that the observer is now running.
+    if (window.isDrednotBotObserverActive) { return; }
     window.isDrednotBotObserverActive = true;
-    console.log('[Bot-JS] Initializing Observer with Advanced Spam Detection...');
-
-    // The rest of the script is unchanged
+    console.log('[Bot-JS] Initializing Observer with Dynamic Command List...');
     window.py_bot_events = [];
     const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
           spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
+    // The 'allCommands' variable is now whatever the Python script passes in.
+    const commandSet = new Set(allCommands);
     window.botUserCooldowns = window.botUserCooldowns || {};
     window.botSpamTracker = window.botSpamTracker || {};
     const targetNode = document.getElementById('chat-content');
@@ -97,7 +93,7 @@ MUTATION_OBSERVER_SCRIPT = """
                 if (!msgTxt.startsWith('!')) continue;
                 const parts = msgTxt.slice(1).trim().split(/ +/);
                 const command = parts.shift().toLowerCase();
-                if (!allCommands.includes(command)) continue;
+                if (!commandSet.has(command)) continue; // Use the Set for faster lookups
                 const spamTracker = window.botSpamTracker[username] = window.botSpamTracker[username] || { count: 0, lastCmd: '', lastTime: 0, penaltyUntil: 0 };
                 if (now < spamTracker.penaltyUntil) continue;
                 const lastCmdTime = window.botUserCooldowns[username] || 0;
@@ -127,6 +123,8 @@ message_queue = queue.Queue(maxsize=100)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
+# NEW: This will store the command list fetched from the server.
+SERVER_COMMAND_LIST = []
 BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "None yet.", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
 command_executor = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS, thread_name_prefix='CmdWorker')
 atexit.register(lambda: command_executor.shutdown(wait=True))
@@ -215,11 +213,9 @@ def message_processor_thread():
             logging.error(f"Unexpected error in message processor: {e}")
         time.sleep(MESSAGE_DELAY_SECONDS)
 
-# MODIFIED: This function now builds the URL safely.
 def process_api_call(command, username, args):
     command_str = f"!{command} {' '.join(args)}"
     try:
-        # Safely join the base URL with the 'command' path
         endpoint_url = urljoin(BOT_SERVER_URL, 'command')
         response = requests.post(
             endpoint_url,
@@ -238,11 +234,9 @@ def process_api_call(command, username, args):
         logging.error(f"Unexpected API error processing '{command_str}': {e}")
         traceback.print_exc()
 
-# MODIFIED: This function now also builds the URL safely.
 def process_commands_list_call(username):
     try:
         queue_reply(f"@{username} Fetching command list from server...")
-        # Safely join the base URL with the 'commands' path
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
         response = requests.get(
             endpoint_url,
@@ -299,7 +293,8 @@ def attempt_soft_rejoin():
             logging.info("✅ Proactive rejoin successful!")
             log_event("Proactive rejoin successful.")
             BOT_STATE["status"] = "Running"
-            driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, ALL_COMMANDS, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS)
+            # Re-inject the observer with the command list we fetched earlier
+            driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS)
             reset_inactivity_timer()
     except Exception as e:
         log_event(f"Rejoin FAILED: {e}")
@@ -308,7 +303,7 @@ def attempt_soft_rejoin():
 
 # --- MAIN BOT LOGIC ---
 def start_bot(use_key_login):
-    global driver
+    global driver, SERVER_COMMAND_LIST
     BOT_STATE["status"] = "Launching Browser..."
     log_event("Performing full start...")
     driver = setup_driver()
@@ -348,8 +343,25 @@ def start_bot(use_key_login):
             raise e
 
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
-        log_event("Injecting chat observer...")
-        driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, ALL_COMMANDS, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS)
+        
+        # NEW LOGIC: Fetch command list from server BEFORE injecting script
+        try:
+            log_event("Fetching command list from server...")
+            endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
+            response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
+            response.raise_for_status()
+            # The server sends a list of strings like: ["!work - ...", "!bal - ..."]
+            # We need to extract just the command name (e.g., "work", "bal")
+            full_command_strings = response.json()
+            # Extract the first word of each command string, remove the '!', and store it.
+            SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
+            log_event(f"Successfully fetched {len(SERVER_COMMAND_LIST)} commands from server.")
+        except Exception as e:
+            log_event(f"CRITICAL: Failed to fetch command list from server: {e}. Bot will not function.")
+            raise RuntimeError(f"Failed to fetch command list: {e}")
+
+        log_event("Injecting chat observer with dynamic command list...")
+        driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS)
         
         log_event("Proactively scanning for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
