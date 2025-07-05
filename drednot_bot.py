@@ -1,5 +1,8 @@
 # drednot_bot.py
 # Final version, optimized for Render/Docker.
+# Anonymous key is hardcoded below for easy editing.
+# API_KEY and other configs are loaded from environment variables for security.
+
 import os
 import queue
 import atexit
@@ -12,6 +15,7 @@ from datetime import datetime
 from collections import deque
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urljoin # NEW: Import urljoin for robust URL building
 
 from flask import Flask, Response
 from selenium import webdriver
@@ -41,7 +45,6 @@ USER_COOLDOWN_SECONDS = 2.0
 SPAM_STRIKE_LIMIT = 3
 SPAM_TIMEOUT_SECONDS = 30
 SPAM_RESET_SECONDS = 5
-# MODIFIED: Added "commands" to the list
 ALL_COMMANDS = ["commands", "bal", "balance", "craft", "cs", "csb", "crateshopbuy", "daily", "eat", "flip", "gather", "info", "inv", "inventory", "lb", "leaderboard", "m", "market", "marketbuy", "marketcancel", "marketsell", "mb", "mc", "ms", "n", "next", "p", "pay", "previous", "recipes", "slots", "smelt", "timers", "traitroll", "traits", "verify", "work", "hourly"]
 
 # --- LOGGING & VALIDATION ---
@@ -212,11 +215,14 @@ def message_processor_thread():
             logging.error(f"Unexpected error in message processor: {e}")
         time.sleep(MESSAGE_DELAY_SECONDS)
 
+# MODIFIED: This function now builds the URL safely.
 def process_api_call(command, username, args):
     command_str = f"!{command} {' '.join(args)}"
     try:
+        # Safely join the base URL with the 'command' path
+        endpoint_url = urljoin(BOT_SERVER_URL, 'command')
         response = requests.post(
-            f"{BOT_SERVER_URL}/command", # Ensure it points to the /command endpoint
+            endpoint_url,
             json={"command": command, "username": username, "args": args},
             headers={"Content-Type": "application/json", "x-api-key": API_KEY},
             timeout=15
@@ -232,20 +238,20 @@ def process_api_call(command, username, args):
         logging.error(f"Unexpected API error processing '{command_str}': {e}")
         traceback.print_exc()
 
-# NEW FUNCTION: Handles the '!commands' call specifically
+# MODIFIED: This function now also builds the URL safely.
 def process_commands_list_call(username):
     try:
         queue_reply(f"@{username} Fetching command list from server...")
-        # Make the GET request to the new /commands endpoint
+        # Safely join the base URL with the 'commands' path
+        endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
         response = requests.get(
-            f"{BOT_SERVER_URL}/commands",
+            endpoint_url,
             headers={"x-api-key": API_KEY},
             timeout=10
         )
         response.raise_for_status()
-        command_list = response.json() # The server should return a JSON list of strings
+        command_list = response.json() 
 
-        # Queue the replies
         queue_reply("--- Available In-Game Commands ---")
         for cmd_string in command_list:
             queue_reply(cmd_string)
@@ -393,7 +399,6 @@ def start_bot(use_key_login):
                         logging.info(f"RECV: '{command_str}' from {user}")
                         BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
 
-                        # MODIFIED: Check for the '!commands' command specifically
                         if cmd == "commands":
                             command_executor.submit(process_commands_list_call, user)
                         else:
