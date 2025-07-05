@@ -1,7 +1,7 @@
 # drednot_bot.py
 # Final version, optimized for Render/Docker.
 # This version dynamically fetches the command list from the server
-# and allows for live updates via the web UI.
+# and allows for live updates via the web UI using a robust action queue.
 
 import os
 import queue
@@ -13,7 +13,7 @@ import requests
 import time
 from datetime import datetime
 from collections import deque
-from threading import Lock, Event
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin 
 
@@ -53,7 +53,7 @@ if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment varia
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
-# --- JAVASCRIPT INJECTION SCRIPT (Unchanged) ---
+# --- JAVASCRIPT INJECTION SCRIPT ---
 MUTATION_OBSERVER_SCRIPT = """
     // Reset the observer flag to allow re-injection
     window.isDrednotBotObserverActive = false;
@@ -124,6 +124,7 @@ class InvalidKeyError(Exception): pass
 
 # --- GLOBAL STATE & THREADING PRIMITIVES ---
 message_queue = queue.Queue(maxsize=100)
+action_queue = queue.Queue(maxsize=10)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
@@ -131,9 +132,6 @@ SERVER_COMMAND_LIST = []
 BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "None yet.", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
 command_executor = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS, thread_name_prefix='CmdWorker')
 atexit.register(lambda: command_executor.shutdown(wait=True))
-
-# NEW: Event to signal the main loop to update commands
-update_commands_event = Event()
 
 def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
@@ -162,7 +160,6 @@ def setup_driver():
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
-    # MODIFIED: Added form with button
     html = f"""
     <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10">
     <title>Drednot Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1,h2{{color:#4ec9b0;border-bottom:1px solid #4ec9b0;padding-bottom:5px;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;font-weight:bold;}}.status-warn{{color:#dccd85;font-weight:bold;}}.status-err{{color:#f44747;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;}}.label{{color:#9cdcfe;font-weight:bold;}}.btn{{background-color:#4ec9b0;color:#1e1e1e;border:none;padding:10px 15px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:1em;margin-top:20px;}}.btn:hover{{background-color:#63d8c1;}}</style></head>
@@ -180,11 +177,13 @@ def health_check():
     """
     return Response(html, mimetype='text/html')
 
-# NEW: Flask endpoint for the button
 @flask_app.route('/update_commands', methods=['POST'])
 def trigger_command_update():
     log_event("WEB UI: Command update triggered.")
-    update_commands_event.set() # Signal the main loop
+    def task():
+        if fetch_command_list():
+            queue_browser_update()
+    command_executor.submit(task)
     return redirect(url_for('health_check'))
 
 def run_flask():
@@ -314,18 +313,17 @@ def attempt_soft_rejoin():
             logging.info("✅ Proactive rejoin successful!")
             log_event("Proactive rejoin successful.")
             BOT_STATE["status"] = "Running"
-            # Re-inject the observer with the command list we fetched earlier
-            fetch_and_update_commands()
+            # After rejoining, re-inject the observer with the current command list
+            queue_browser_update()
             reset_inactivity_timer()
     except Exception as e:
         log_event(f"Rejoin FAILED: {e}")
         logging.error(f"Proactive rejoin failed: {e}. Triggering full restart.")
         if driver: driver.quit()
 
-# NEW: Centralized function to fetch and apply the command list
-def fetch_and_update_commands():
-    """Fetches command list from server, applies it, and re-injects the JS observer."""
-    global SERVER_COMMAND_LIST, driver
+def fetch_command_list():
+    """Fetches command list from server and updates the global variable. Returns success."""
+    global SERVER_COMMAND_LIST
     try:
         log_event("Fetching command list from server...")
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
@@ -334,34 +332,23 @@ def fetch_and_update_commands():
         
         full_command_strings = response.json()
         SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
-        
-        # Add special, unlisted commands
         SERVER_COMMAND_LIST.append('verify')
-        
-        log_event(f"Successfully processed {len(SERVER_COMMAND_LIST)} commands (including special).")
-
-        with driver_lock:
-            if driver:
-                log_event("Injecting/updating chat observer with new command list...")
-                driver.execute_script(
-                    MUTATION_OBSERVER_SCRIPT, 
-                    ZWSP, 
-                    SERVER_COMMAND_LIST, 
-                    USER_COOLDOWN_SECONDS, 
-                    SPAM_STRIKE_LIMIT, 
-                    SPAM_TIMEOUT_SECONDS, 
-                    SPAM_RESET_SECONDS
-                )
-                return True
-            else:
-                log_event("WARN: Cannot inject observer, driver not running.")
-                return False
+        log_event(f"Successfully processed {len(SERVER_COMMAND_LIST)} commands.")
+        return True
     except Exception as e:
-        log_event(f"CRITICAL: Failed to fetch/update command list: {e}")
-        logging.error(f"Failed to fetch/update command list: {e}")
-        # Optionally, queue a reply to notify in-game that the update failed
-        queue_reply("Error: Failed to refresh commands from server.")
+        log_event(f"CRITICAL: Failed to fetch command list: {e}")
         return False
+
+def queue_browser_update():
+    """Queues an action to re-inject the JS observer with the current command list."""
+    def update_action(driver_instance):
+        log_event("Injecting/updating chat observer...")
+        driver_instance.execute_script(
+            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
+        )
+        queue_reply("Commands have been updated live.")
+    action_queue.put(update_action)
 
 # --- MAIN BOT LOGIC ---
 def start_bot(use_key_login):
@@ -406,9 +393,14 @@ def start_bot(use_key_login):
 
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
         
-        # MODIFIED: Use the new function for the initial fetch
-        if not fetch_and_update_commands():
+        if not fetch_command_list():
             raise RuntimeError("Initial command fetch failed. Cannot start bot.")
+
+        log_event("Injecting initial chat observer...")
+        driver.execute_script(
+            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
+        )
 
         log_event("Proactively scanning for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
@@ -443,16 +435,18 @@ def start_bot(use_key_login):
     
     while True:
         try:
-            # NEW: Check for the update event
-            if update_commands_event.is_set():
-                log_event("Main loop received command update signal.")
-                queue_reply("Refreshing command list from server...")
-                if fetch_and_update_commands():
-                    queue_reply("Commands have been updated live.")
-                update_commands_event.clear() # Reset the event after handling it
+            # Check the action queue first
+            try:
+                while not action_queue.empty():
+                    action_to_run = action_queue.get_nowait()
+                    with driver_lock:
+                        if driver:
+                            action_to_run(driver) 
+            except queue.Empty:
+                pass
 
             with driver_lock:
-                if not driver: break # Exit loop if driver has been shut down
+                if not driver: break
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
             
             if new_events:
