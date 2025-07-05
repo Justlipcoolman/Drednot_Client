@@ -1,6 +1,6 @@
 # drednot_bot.py
-# Final version with IN-GAME LEADER ELECTION to prevent multiple instances.
-# No server-side changes are required for this to work.
+# Final version with IN-GAME LEADER ELECTION and a "Listening Phase" on startup.
+# This prevents a "split-brain" scenario during redeployments.
 
 import os
 import queue
@@ -40,6 +40,7 @@ LEADER_TIMEOUT_SECONDS = 35   # If we don't hear from a bot in this time, assume
 IS_LEADER = False # Global flag to determine if this instance is the active one
 active_bots = {}  # Dictionary to track other bots: { "instance_id": last_seen_timestamp }
 active_bots_lock = Lock() # Lock for safely modifying the active_bots dictionary
+STARTUP_LISTEN_SECONDS = 5 # How long to listen for other bots before the first election.
 
 MESSAGE_DELAY_SECONDS = 0.2
 ZWSP = '\u200B'
@@ -49,7 +50,7 @@ INACTIVITY_TIMEOUT_SECONDS = 2 * 60
 MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.05
 MAX_WORKER_THREADS = 10
 
-# Spam Control (Unchanged)
+# Spam Control
 USER_COOLDOWN_SECONDS = 2.0
 SPAM_STRIKE_LIMIT = 3
 SPAM_TIMEOUT_SECONDS = 30
@@ -62,7 +63,7 @@ if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment varia
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
-# --- JAVASCRIPT INJECTION SCRIPT (HEAVILY MODIFIED FOR LEADER ELECTION) ---
+# --- JAVASCRIPT INJECTION SCRIPT ---
 MUTATION_OBSERVER_SCRIPT = """
     if (window.isDrednotBotObserverActive) { return; }
     window.isDrednotBotObserverActive = true;
@@ -70,14 +71,9 @@ MUTATION_OBSERVER_SCRIPT = """
     
     window.py_bot_events = [];
     const zwsp = arguments[0];
-    const rollcallPrefix = arguments[1]; // e.g., "[ROLLCALL:"
-    const heartbeatPrefix = arguments[2]; // e.g., "[HBEAT:"
-
-    // This script NO LONGER needs the command list. It sends ALL !-prefixed messages to Python.
-    // Python will be responsible for filtering valid commands.
+    const rollcallPrefix = arguments[1];
+    const heartbeatPrefix = arguments[2];
     
-    window.botUserCooldowns = window.botUserCooldowns || {};
-    window.botSpamTracker = window.botSpamTracker || {};
     const targetNode = document.getElementById('chat-content');
     if (!targetNode) { return; }
 
@@ -90,21 +86,18 @@ MUTATION_OBSERVER_SCRIPT = """
                 
                 const pText = node.textContent || "";
                 
-                // --- LEADER ELECTION LOGIC ---
-                // Listen for roll calls and heartbeats from other bots
                 if (pText.startsWith(zwsp + rollcallPrefix)) {
                     const id = pText.slice((zwsp + rollcallPrefix).length, -1);
                     window.py_bot_events.push({ type: 'rollcall', id: id });
-                    continue; // This is a bot message, not a user command
+                    continue;
                 }
                 if (pText.startsWith(zwsp + heartbeatPrefix)) {
                     const id = pText.slice((zwsp + heartbeatPrefix).length, -1);
                     window.py_bot_events.push({ type: 'heartbeat', id: id });
-                    continue; // This is a bot message, not a user command
+                    continue;
                 }
                 
-                // --- USER COMMAND LOGIC ---
-                if (pText.startsWith(zwsp)) continue; // Ignore messages from our own bot
+                if (pText.startsWith(zwsp)) continue;
                 
                 const colonIdx = pText.indexOf(':');
                 if (colonIdx === -1) continue;
@@ -115,11 +108,10 @@ MUTATION_OBSERVER_SCRIPT = """
                 const username = bdiElement.innerText.trim();
                 const msgTxt = pText.substring(colonIdx + 1).trim();
                 
-                // Send ANY message starting with '!' to the Python backend for validation.
                 if (msgTxt.startsWith('!')) {
                     const parts = msgTxt.slice(1).trim().split(/ +/);
                     const command = parts.shift().toLowerCase();
-                    if (command) { // Ensure there is actually a command
+                    if (command) {
                         window.py_bot_events.push({ type: 'potential_command', command: command, username: username, args: parts });
                     }
                 }
@@ -139,11 +131,11 @@ message_queue = queue.Queue(maxsize=100)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
-SERVER_COMMAND_LIST = [] # Will be fetched from server for command validation
+SERVER_COMMAND_LIST = [] 
 BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "None yet.", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
 command_executor = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS, thread_name_prefix='CmdWorker')
 atexit.register(lambda: command_executor.shutdown(wait=True))
-heartbeat_thread_instance = None # To hold the heartbeat thread object
+heartbeat_thread_instance = None 
 
 def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
@@ -251,20 +243,19 @@ def evaluate_leader():
         was_leader = IS_LEADER
         IS_LEADER = (new_leader_id == INSTANCE_ID)
         
+        leader_id_short = new_leader_id[:8] if new_leader_id else 'None'
+
         if IS_LEADER and not was_leader:
             log_event("LEADER: This instance has been promoted to LEADER.")
             BOT_STATE["status"] = "Leader: Running"
         elif not IS_LEADER and was_leader:
-            leader_id_short = new_leader_id[:8] if new_leader_id else 'None'
             log_event(f"LEADER: This instance was demoted. New leader: {leader_id_short}.")
             BOT_STATE["status"] = f"Standby (Leader: {leader_id_short})"
         
         if not IS_LEADER:
-            leader_id_short = new_leader_id[:8] if new_leader_id else 'N/A'
             BOT_STATE["status"] = f"Standby (Leader: {leader_id_short})"
 
 def heartbeat_thread_func():
-    """Periodically sends an in-game heartbeat and re-evaluates the leader."""
     while True:
         time.sleep(HEARTBEAT_INTERVAL_SECONDS)
         try:
@@ -273,7 +264,6 @@ def heartbeat_thread_func():
         except Exception as e:
             logging.error(f"Error in heartbeat thread: {e}")
 
-# The functions for processing API calls are unchanged...
 def process_api_call(command, username, args):
     command_str = f"!{command} {' '.join(args)}"
     try:
@@ -377,12 +367,28 @@ def start_bot(use_key_login):
         log_event("Injecting chat observer...")
         driver.execute_script(MUTATION_OBSERVER_SCRIPT, ZWSP, ROLLCALL_PREFIX, HEARTBEAT_PREFIX)
         
+        log_event(f"Joining ship. Announcing presence with ROLLCALL...")
         queue_reply(f"{ROLLCALL_PREFIX}{INSTANCE_ID}]")
+        
+        log_event(f"Entering {STARTUP_LISTEN_SECONDS}s listening phase to discover other bots...")
+        BOT_STATE["status"] = "Listening for peers..."
+        
+        start_time = time.time()
+        while time.time() - start_time < STARTUP_LISTEN_SECONDS:
+            new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+            for event in new_events:
+                if event['type'] == 'rollcall' or event['type'] == 'heartbeat':
+                    with active_bots_lock:
+                        active_bots[event['id']] = time.time()
+            time.sleep(0.5)
+        
+        log_event("Listening phase complete. Holding first election.")
         evaluate_leader()
 
     if heartbeat_thread_instance is None or not heartbeat_thread_instance.is_alive():
         heartbeat_thread_instance = threading.Thread(target=heartbeat_thread_func, daemon=True)
         heartbeat_thread_instance.start()
+        log_event("Heartbeat thread started.")
     
     logging.info(f"Instance {INSTANCE_ID[:8]} is active. Leader: {IS_LEADER}. Polling...")
     
@@ -416,7 +422,6 @@ def start_bot(use_key_login):
                             command_executor.submit(process_commands_list_call, user)
                         else:
                             command_executor.submit(process_api_call, cmd, user, args)
-
         except WebDriverException as e:
             logging.error(f"WebDriver exception in main loop. Assuming disconnect: {e.msg}")
             raise
