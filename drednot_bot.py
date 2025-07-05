@@ -1,8 +1,5 @@
 # drednot_bot.py
 # Final version, optimized for Render/Docker.
-# Anonymous key is hardcoded below for easy editing.
-# API_KEY and other configs are loaded from environment variables for security.
-
 import os
 import queue
 import atexit
@@ -44,7 +41,8 @@ USER_COOLDOWN_SECONDS = 2.0
 SPAM_STRIKE_LIMIT = 3
 SPAM_TIMEOUT_SECONDS = 30
 SPAM_RESET_SECONDS = 5
-ALL_COMMANDS = ["bal", "balance", "craft", "cs", "csb", "crateshopbuy", "daily", "eat", "flip", "gather", "info", "inv", "inventory", "lb", "leaderboard", "m", "market", "marketbuy", "marketcancel", "marketsell", "mb", "mc", "ms", "n", "next", "p", "pay", "previous", "recipes", "slots", "smelt", "timers", "traitroll", "traits", "verify", "work", "hourly"]
+# MODIFIED: Added "commands" to the list
+ALL_COMMANDS = ["commands", "bal", "balance", "craft", "cs", "csb", "crateshopbuy", "daily", "eat", "flip", "gather", "info", "inv", "inventory", "lb", "leaderboard", "m", "market", "marketbuy", "marketcancel", "marketsell", "mb", "mc", "ms", "n", "next", "p", "pay", "previous", "recipes", "slots", "smelt", "timers", "traitroll", "traits", "verify", "work", "hourly"]
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -218,7 +216,7 @@ def process_api_call(command, username, args):
     command_str = f"!{command} {' '.join(args)}"
     try:
         response = requests.post(
-            BOT_SERVER_URL,
+            f"{BOT_SERVER_URL}/command", # Ensure it points to the /command endpoint
             json={"command": command, "username": username, "args": args},
             headers={"Content-Type": "application/json", "x-api-key": API_KEY},
             timeout=15
@@ -232,6 +230,32 @@ def process_api_call(command, username, args):
         queue_reply(f"@{username} Sorry, the economy server seems to be down.")
     except Exception as e:
         logging.error(f"Unexpected API error processing '{command_str}': {e}")
+        traceback.print_exc()
+
+# NEW FUNCTION: Handles the '!commands' call specifically
+def process_commands_list_call(username):
+    try:
+        queue_reply(f"@{username} Fetching command list from server...")
+        # Make the GET request to the new /commands endpoint
+        response = requests.get(
+            f"{BOT_SERVER_URL}/commands",
+            headers={"x-api-key": API_KEY},
+            timeout=10
+        )
+        response.raise_for_status()
+        command_list = response.json() # The server should return a JSON list of strings
+
+        # Queue the replies
+        queue_reply("--- Available In-Game Commands ---")
+        for cmd_string in command_list:
+            queue_reply(cmd_string)
+        queue_reply("------------------------------------")
+
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to fetch command list: {e}")
+        queue_reply(f"@{username} Sorry, couldn't fetch the command list. The server might be down.")
+    except Exception as e:
+        logging.error(f"Unexpected error fetching command list: {e}")
         traceback.print_exc()
 
 def reset_inactivity_timer():
@@ -368,7 +392,13 @@ def start_bot(use_key_login):
                         command_str = f"!{cmd} {' '.join(args)}"
                         logging.info(f"RECV: '{command_str}' from {user}")
                         BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
-                        command_executor.submit(process_api_call, cmd, user, args)
+
+                        # MODIFIED: Check for the '!commands' command specifically
+                        if cmd == "commands":
+                            command_executor.submit(process_commands_list_call, user)
+                        else:
+                            command_executor.submit(process_api_call, cmd, user, args)
+                            
                     elif event['type'] == 'spam_detected':
                         username, command = event['username'], event['command']
                         log_event(f"SPAM: Timed out '{username}' for {SPAM_TIMEOUT_SECONDS}s for spamming '!{command}'.")
