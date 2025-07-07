@@ -141,9 +141,19 @@ def log_event(message):
 
 # --- BROWSER & FLASK SETUP ---
 def setup_driver():
+    """
+    THIS IS THE MODIFIED FUNCTION.
+    It now explicitly tells Selenium where to find the Chromium browser and its driver
+    inside the Docker container, preventing the 'Browser not found' error.
+    """
     logging.info("Launching headless browser for Docker environment...")
     chrome_options = Options()
-    
+
+    # --- START OF CHANGE ---
+    # Explicitly set the path to the Chromium binary installed by 'apt-get' in the Dockerfile.
+    chrome_options.binary_location = "/usr/bin/chromium"
+    # --- END OF CHANGE ---
+
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -154,7 +164,12 @@ def setup_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    service = Service()
+
+    # --- START OF CHANGE ---
+    # Explicitly set the path to the chromedriver executable installed by 'apt-get'.
+    service = Service(executable_path="/usr/bin/chromedriver")
+    # --- END OF CHANGE ---
+    
     return webdriver.Chrome(service=service, options=chrome_options)
 
 flask_app = Flask('')
