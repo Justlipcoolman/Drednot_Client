@@ -1,7 +1,5 @@
 # drednot_bot.py
-# Final version, optimized for Render/Docker with memory leak protection.
-# This version dynamically fetches commands, sends chat via WebSocket,
-# and includes robust process cleanup to prevent memory leaks.
+# Final version, corrected to inject msgpack library dependency, fixing the send error.
 
 import os
 import queue
@@ -17,7 +15,6 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin 
 
-# NEW IMPORT for process cleanup
 import psutil
 
 from flask import Flask, Response, request, redirect, url_for
@@ -54,7 +51,12 @@ if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment varia
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
-# --- UPDATED UNIFIED JAVASCRIPT INJECTION SCRIPT (with memory leak fix) ---
+
+# --- NEW: MSGPACK JAVASCRIPT LIBRARY ---
+MSGPACK_JS_LIBRARY = """
+!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?t(exports):"function"==typeof define&&define.amd?define(["exports"],t):t((e="undefined"!=typeof globalThis?globalThis:e||self).msgpack={})}(this,(function(e){"use strict";const t=new Uint8Array(0);class n{constructor(e,t){this.type=e,this.data=t}}class r{constructor(){this.typeToData=new Map,this.dataToType=new Map}add({type:e,data:t,encode:r,decode:o}){const i=this.typeToData.get(e),s=this.dataToType.get(t);if(i&&s)throw new Error(`The type ${e} is already registered to ${t}, and the data is already registered to ${i}`);if(i)throw new Error(`The type ${e} is already registered to ${i}`);if(s)throw new Error(`The data is already registered to ${s}`);this.typeToData.set(e,t),this.dataToType.set(t,{type:e,encode:r,decode:o})}tryToEncode(e,t){const r=Object.getPrototypeOf(e);if(null==r)return null;const o=this.dataToType.get(r);return o?new n(o.type,o.encode(e,t)):null}}const o=new r;o.add({type:-1,data:Date.prototype,encode:e=>{const n=e.getTime(),r=Math.floor(n/4294967296),o=4294967295&n;if(r>0){const e=new Uint8Array(8);return(new DataView(e.buffer)).setBigUint64(0,BigInt(n),!1),e}if(4294967295&(o|4294967296*r)>>>0!==o)throw new Error("32-bit date-time is not supported yet");{const n=new Uint8Array(4);return(new DataView(n.buffer)).setUint32(0,o,!1),n}},decode(e){const t=new DataView(e.buffer,e.byteOffset,e.byteLength);switch(e.byteLength){case 4:return new Date(1e3*t.getUint32(0,!1));case 8:{const e=t.getBigUint64(0,!1);return new Date(Number(e))}case 12:return new Date(1e3*Number(t.getBigInt64(4,!1))+t.getUint32(0,!1)/1e6);default:throw new Error(`Unrecognized data size for timestamp: ${e.byteLength}`)}}});const i={maxStrLength:4294967295,maxBinLength:4294967295,maxArrayLength:4294967295,maxMapLength:4294967295,maxExtLength:4294967295};class s{constructor(e){this.options=Object.assign({},i,e),this.extensionCodec=this.options.extensionCodec??o,this.context=this.options.context,this.pos=0;const t=this.options.initialBufferSize??2048;this.buffer=new Uint8Array(t),this.view=new DataView(this.buffer.buffer)}getUint8Array(){return this.buffer.subarray(0,this.pos)}ensureBufferSize(e){const t=this.buffer.byteLength;if(t<this.pos+e){const n=Math.max(2*t,this.pos+e),r=new Uint8Array(n);r.set(this.buffer),this.buffer=r,this.view=new DataView(r.buffer)}}pack(e){if(null==e)return this.packNil();if(!1===e)return this.packBoolean(!1);if(!0===e)return this.packBoolean(!0);if("number"==typeof e)return this.packNumber(e);if("bigint"==typeof e)return this.packBigInt(e);if("string"==typeof e)return this.packString(e);if(Array.isArray(e))return this.packArray(e);if(e instanceof Uint8Array)return this.packBinary(e);if("object"==typeof e)return this.packObject(e);throw new Error("Unrecognized object: "+Object.prototype.toString.apply(e))}packNil(){this.ensureBufferSize(1),this.view.setUint8(this.pos++,192)}packBoolean(e){this.ensureBufferSize(1),e?this.view.setUint8(this.pos++,195):this.view.setUint8(this.pos++,194)}packNumber(e){if(Number.isSafeInteger(e)&&!this.options.forceFloat32&&!this.options.forceFloat64&&!this.options.forceIntegerToFloat){if(e>=0)return e<128?this.packInt(e):e<256?this.packU8(e):e<65536?this.packU16(e):this.packU32(e);if(e>=-32)return this.packInt(e);if(e>=-128)return this.packI8(e);if(e>=-32768)return this.packI16(e);if(e>=-2147483648)return this.packI32(e)}this.options.forceFloat32?this.packF32(e):this.packF64(e)}packBigInt(e){if(e>=BigInt(0)){if(e<BigInt(1<<64))return this.packU64(e)}else if(e>=BigInt(-(1<<63)))return this.packI64(e);const t=this.extensionCodec.tryToEncode(e,this.context);if(null!=t)return this.packExtension(t);throw new Error("The value is too large for bigint: "+e)}writeU8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,204),this.view.setUint8(this.pos++,e)}writeU16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,205),this.view.setUint16(this.pos,e,!1),this.pos+=2}writeU32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,206),this.view.setUint32(this.pos,e,!1),this.pos+=4}packU8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,204),this.view.setUint8(this.pos++,e)}packU16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,205),this.view.setUint16(this.pos,e,!1),this.pos+=2}packU32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,206),this.view.setUint32(this.pos,e,!1),this.pos+=4}packU64(e){this.ensureBufferSize(9),this.view.setUint8(this.pos++,207),this.view.setBigUint64(this.pos,e,!1),this.pos+=8}packI8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,208),this.view.setInt8(this.pos++,e)}packI16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,209),this.view.setInt16(this.pos,e,!1),this.pos+=2}packI32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,210),this.view.setInt32(this.pos,e,!1),this.pos+=4}packI64(e){this.ensureBufferSize(9),this.view.setUint8(this.pos++,211),this.view.setBigInt64(this.pos,e,!1),this.pos+=8}packF32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,202),this.view.setFloat32(this.pos,e,!1),this.pos+=4}packF64(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,203),this.view.setFloat64(this.pos,e,!1),this.pos+=4}packInt(e){this.ensureBufferSize(1),this.view.setUint8(this.pos++,e)}packString(e){const t=this.options.maxStrLength;if(e.length>t)throw new Error(`String is too long: ${e.length} > ${t}`);const n=4*e.length;this.ensureBufferSize(5+n);const r=TEXT_ENCODER.encode(e),o=r.length;if(o<32)this.ensureBufferSize(1+o),this.view.setUint8(this.pos++,160|o);else if(o<256){if(this.ensureBufferSize(2+o),this.view.setUint8(this.pos++,217),this.view.setUint8(this.pos++,o),o>t)throw new Error(`String is too long: ${o} > ${t}`)}else if(o<65536){if(this.ensureBufferSize(3+o),this.view.setUint8(this.pos++,218),this.view.setUint16(this.pos,o,!1),this.pos+=2,o>t)throw new Error(`String is too long: ${o} > ${t}`)}else{if(!(o<4294967296))throw new Error("Too long string: "+o+" bytes in UTF-8");if(this.ensureBufferSize(5+o),this.view.setUint8(this.pos++,219),this.view.setUint32(this.pos,o,!1),this.pos+=4,o>t)throw new Error(`String is too long: ${o} > ${t}`)}this.buffer.set(r,this.pos),this.pos+=o}packArray(e){const t=e.length;if(t<16)this.ensureBufferSize(1),this.view.setUint8(this.pos++,144|t);else if(t<65536)this.ensureBufferSize(3),this.view.setUint8(this.pos++,220),this.view.setUint16(this.pos,t,!1),this.pos+=2;else{if(!(t<4294967296))throw new Error("Too large array: "+t);this.ensureBufferSize(5),this.view.setUint8(this.pos++,221),this.view.setUint32(this.pos,t,!1),this.pos+=4}for(const n of e)this.pack(n)}packBinary(e){const t=e.length,n=this.options.maxBinLength;if(t>n)throw new Error(`Binary is too long: ${t} > ${n}`);if(t<256)this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,196),this.view.setUint8(this.pos++,t);else if(t<65536)this.ensureBufferSize(3+t),this.view.setUint8(this.pos++,197),this.view.setUint16(this.pos,t,!1),this.pos+=2;else{if(!(t<4294967296))throw new Error("Too large binary: "+t);this.ensureBufferSize(5+t),this.view.setUint8(this.pos++,198),this.view.setUint32(this.pos,t,!1),this.pos+=4}this.buffer.set(e,this.pos),this.pos+=t}packExtension(e){const t=e.data.length,n=this.options.maxExtLength;if(t>n)throw new Error(`Extension is too long: ${t} > ${n}`);1===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,212)):2===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,213)):4===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,214)):8===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,215)):16===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,216)):t<256?(this.ensureBufferSize(3+t),this.view.setUint8(this.pos++,199),this.view.setUint8(this.pos++,t)):t<65536?(this.ensureBufferSize(4+t),this.view.setUint8(this.pos++,200),this.view.setUint16(this.pos,t,!1),this.pos+=2):t<4294967296&&(this.ensureBufferSize(6+t),this.view.setUint8(this.pos++,201),this.view.setUint32(this.pos,t,!1),this.pos+=4),this.view.setInt8(this.pos++,e.type),this.buffer.set(e.data,this.pos),this.pos+=t}packObject(e){const t=this.extensionCodec.tryToEncode(e,this.context);if(null!=t)return this.packExtension(t);const n=Object.keys(e).filter(t=>void 0!==e[t]),r=n.length,o=this.options.maxMapLength;if(r>o)throw new Error(`Map is too large: ${r} > ${o}`);if(this.options.sortKeys){const e=n.map(e=>[TEXT_ENCODER.encode(e),e]);e.sort(([e],[t])=>{for(let n=0;n<e.length;n++)if(n>=t.length)return 1;else{const r=e[n]-t[n];if(0!==r)return r}return e.length-t.length});const t=[];for(const[n,r]of e)t.push(r);return this.packObjectByOrder(e,t)}this.packMapHeader(r);for(const t of n)this.pack(t),this.pack(e[t])}packMapHeader(e){if(e<16)this.ensureBufferSize(1),this.view.setUint8(this.pos++,128|e);else if(e<65536)this.ensureBufferSize(3),this.view.setUint8(this.pos++,222),this.view.setUint16(this.pos,e,!1),this.pos+=2;else{if(!(e<4294967296))throw new Error("Too large map: "+e);this.ensureBufferSize(5),this.view.setUint8(this.pos++,223),this.view.setUint32(this.pos,e,!1),this.pos+=4}}packObjectByOrder(e,t){this.packMapHeader(e.length);for(const n of t)this.pack(n),this.pack(e[n])}}const TEXT_ENCODER=new TextEncoder;class c extends Error{constructor(e){super(e),Object.setPrototypeOf(this,new.target.prototype),this.name=new.target.name}}const a={maxStrLength:4294967295,maxBinLength:4294967295,maxArrayLength:4294967295,maxMapLength:4294967295,maxExtLength:4294967295};class u{constructor(e){this.options=Object.assign({},a,e),this.extensionCodec=this.options.extensionCodec??o,this.context=this.options.context,this.pos=0,this.buffer=t}decode(e){this.setBuffer(e);try{return this.doDecode()}catch(e){if(e instanceof c)throw e;throw new c(e.message)}}doDecode(){const e=this.readHeadByte();return e>=224?e-256:e<=127?e:e>=128&&e<=143?this.decodeMap(e-128):e>=144&&e<=159?this.decodeArray(e-144):e>=160&&e<=191?this.decodeStr(e-160):192===e?null:193===e?this.decodeNeverUsed():194===e?!1:195===e?!0:196===e?this.decodeBin(this.readU8()):197===e?this.decodeBin(this.readU16()):198===e?this.decodeBin(this.readU32()):199===e?this.decodeExt(this.readU8()):200===e?this.decodeExt(this.readU16()):201===e?this.decodeExt(this.readU32()):202===e?this.readF32():203===e?this.readF64():204===e?this.readU8():205===e?this.readU16():206===e?this.readU32():207===e?this.readU64():208===e?this.readI8():209===e?this.readI16():210===e?this.readI32():211===e?this.readI64():212===e?this.decodeExt(1):213===e?this.decodeExt(2):214===e?this.decodeExt(4):215===e?this.decodeExt(8):216===e?this.decodeExt(16):217===e?this.decodeStr(this.readU8()):218===e?this.decodeStr(this.readU16()):219===e?this.decodeStr(this.readU32()):220===e?this.decodeArray(this.readU16()):221===e?this.decodeArray(this.readU32()):222===e?this.decodeMap(this.readU16()):223===e?this.decodeMap(this.readU32()):(()=>{throw new c(`Unrecognized header byte: ${e}`)})()}setBuffer(e){e instanceof ArrayBuffer?this.buffer=new Uint8Array(e):e instanceof Uint8Array?this.buffer=e:(()=>{if(!ArrayBuffer.isView(e))throw new Error("buffer must be an ArrayBuffer or an ArrayBufferView");this.buffer=new Uint8Array(e.buffer,e.byteOffset,e.byteLength)})(),this.view=new DataView(this.buffer.buffer),this.pos=0}readHeadByte(){return this.view.getUint8(this.pos++)}readU8(){const e=this.view.getUint8(this.pos);return this.pos+=1,e}readU16(){const e=this.view.getUint16(this.pos,!1);return this.pos+=2,e}readU32(){const e=this.view.getUint32(this.pos,!1);return this.pos+=4,e}readU64(){const e=this.view.getBigUint64(this.pos,!1);return this.pos+=8,e}readI8(){const e=this.view.getInt8(this.pos);return this.pos+=1,e}readI16(){const e=this.view.getInt16(this.pos,!1);return this.pos+=2,e}readI32(){const e=this.view.getInt32(this.pos,!1);return this.pos+=4,e}readI64(){const e=this.view.getBigInt64(this.pos,!1);return this.pos+=8,e}readF32(){const e=this.view.getFloat32(this.pos,!1);return this.pos+=4,e}readF64(){const e=this.view.getFloat64(this.pos,!1);return this.pos+=8,e}decodeStr(e){const t=this.options.maxStrLength;if(e>t)throw new Error(`String is too long: ${e} > ${t}`);const n=this.pos;this.pos+=e;try{return TEXT_DECODER_RUNTIME.decode(this.buffer.subarray(n,this.pos))}catch(t){if(!(t instanceof TypeError))throw t;const e=new TextDecoder(this.options.string_decoder||"utf-8",{fatal:!1});return e.decode(this.buffer.subarray(n,this.pos))}}decodeBin(e){const t=this.options.maxBinLength;if(e>t)throw new Error(`Binary is too long: ${e} > ${t}`);const n=this.pos,r=this.buffer.subarray(n,n+e);return this.pos+=e,r}decodeArray(e){const t=this.options.maxArrayLength;if(e>t)throw new Error(`Array is too long: ${e} > ${t}`);const n=[];for(let t=0;t<e;t++){const e=this.doDecode();n.push(e)}return n}decodeMap(e){const t=this.options.maxMapLength;if(e>t)throw new Error(`Map is too long: ${e} > ${t}`);const n=Object.create(null);for(let t=0;t<e;t++){const e=this.doDecode();if("string"!=typeof e&&"number"!=typeof e)throw new c("The key of a map must be a string or a number");const r=this.doDecode();n[e]=r}return n}decodeExt(e){const t=this.options.maxExtLength;if(e>t)throw new Error(`Extension is too long: ${e} > ${t}`);const r=this.readI8(),o=this.decodeBin(e);return this.extensionCodec.decode(o,r,this.context)}decodeNeverUsed(){throw new c("Invalid byte code: 0xc1 is reserved")}}{const e="undefined"!=typeof process&&null!=process?.versions?.node;let t;const n="undefined"!=typeof TextDecoder&&!e;t=n?new TextDecoder("utf-8",{fatal:!0}):null;const r=e=>n?t.decode(e):Buffer.from(e).toString("utf-8");var TEXT_DECODER_RUNTIME={decode:r}}e.DecodeError=c,e.Encoder=s,e.ExtensionCodec=r,e.ExtData=n,e.decode=(e,t)=>{const n=new u(t);return n.decode(e)},e.encode=(e,t)=>{const n=new s(t);return n.pack(e),n.getUint8Array()},Object.defineProperty(e,"__esModule",{value:!0})}));
+"""
+
 UNIFIED_CLIENT_SCRIPT = """
     // Part 1: WebSocket Capture and Sender
     console.log('[Bot-JS] Initializing WebSocket Interceptor...');
@@ -80,7 +82,7 @@ UNIFIED_CLIENT_SCRIPT = """
             return false;
         }
         if (typeof window.msgpack?.encode !== 'function') {
-            console.error('[Bot-JS] Send failed: msgpack library not found.');
+            console.error('[Bot-JS] Send failed: msgpack library not found on window object.');
             return false;
         }
         try {
@@ -380,7 +382,8 @@ def fetch_command_list():
 
 def queue_browser_update():
     def update_action(driver_instance):
-        log_event("Injecting/updating JS client (WS Sender + Observer)...")
+        log_event("Injecting/updating JS client...")
+        # Note: We don't need to re-inject msgpack on a simple update
         driver_instance.execute_script(
             UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
@@ -398,7 +401,7 @@ def start_bot(use_key_login):
     with driver_lock:
         logging.info(f"Navigating to invite link...")
         driver.get(SHIP_INVITE_LINK)
-        wait = WebDriverWait(driver, 15)
+        wait = WebDriverWait(driver, 30)
         
         try:
             btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal-container .btn-green")))
@@ -429,17 +432,21 @@ def start_bot(use_key_login):
             log_event(f"Login failed critically: {e}")
             raise
 
-        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
+        wait.until(EC.presence_of_element_located((By.ID, "chat-input")))
         
         if not fetch_command_list():
             raise RuntimeError("Initial command fetch failed. Cannot start bot.")
 
-        log_event("Injecting initial Unified JS Client (WS + Observer)...")
+        # === THE FIX: INJECT MSGPACK FIRST, THEN INJECT THE CLIENT SCRIPT ===
+        log_event("Injecting required msgpack library...")
+        driver.execute_script(MSGPACK_JS_LIBRARY)
+        
+        log_event("Injecting Unified JS Client (WS + Observer)...")
         driver.execute_script(
             UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
         )
-
+        
         log_event("Proactively scanning for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
         found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
@@ -473,7 +480,6 @@ def start_bot(use_key_login):
     
     while True:
         try:
-            # Check the action queue first
             try:
                 while not action_queue.empty():
                     action_to_run = action_queue.get_nowait()
@@ -483,7 +489,6 @@ def start_bot(use_key_login):
             except queue.Empty:
                 pass
 
-            # Poll for events from the browser
             with driver_lock:
                 if not driver: break
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
@@ -513,7 +518,7 @@ def start_bot(use_key_login):
             raise
         time.sleep(MAIN_LOOP_POLLING_INTERVAL_SECONDS)
 
-# --- NEW FUNCTION TO PREVENT MEMORY LEAKS ---
+# --- MEMORY LEAK PREVENTION ---
 def cleanup_processes():
     logging.info("Running cleanup task to find and kill zombie processes...")
     killed_count = 0
@@ -548,7 +553,7 @@ def cleanup_processes():
     else:
         logging.info("Cleanup finished. No lingering processes found.")
 
-# --- MAIN EXECUTION (MODIFIED FOR MEMORY SAFETY) ---
+# --- MAIN EXECUTION ---
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=message_processor_thread, daemon=True).start()
@@ -594,7 +599,6 @@ def main():
                     logging.warning(f"driver.quit() failed with an error: {e}")
             driver = None
             
-            # This forceful cleanup is the key to preventing memory leaks
             cleanup_processes()
             
             time.sleep(5)
