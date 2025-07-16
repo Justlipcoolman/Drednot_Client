@@ -1,7 +1,7 @@
 # drednot_bot.py
 # Final version, optimized for Render/Docker.
-# This version dynamically fetches the command list from the server
-# and allows for live updates via the web UI using a robust action queue.
+# This version dynamically fetches commands and sends all chat via WebSocket
+# for maximum performance and reliability.
 
 import os
 import queue
@@ -53,8 +53,63 @@ if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment varia
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
-# --- JAVASCRIPT INJECTION SCRIPT ---
-MUTATION_OBSERVER_SCRIPT = """
+# --- NEW UNIFIED JAVASCRIPT INJECTION SCRIPT (WS + OBSERVER) ---
+UNIFIED_CLIENT_SCRIPT = """
+    // Part 1: WebSocket Capture and Sender
+    // ===========================================
+    console.log('[Bot-JS] Initializing WebSocket Interceptor...');
+    window.active_ws_connection = null; // Global handle for the bot to use
+    const OriginalWebSocket = window.WebSocket;
+
+    // Override the native WebSocket constructor
+    window.WebSocket = function(url, protocols) {
+        const wsInstance = new OriginalWebSocket(url, protocols);
+        console.log('[Bot-JS] Game WebSocket created. Capturing instance.');
+        
+        wsInstance.addEventListener('open', () => {
+            console.log('[Bot-JS] WebSocket connection is OPEN. Bot can now send messages.');
+            window.active_ws_connection = wsInstance;
+        });
+        
+        wsInstance.addEventListener('close', (event) => {
+            console.warn(`[Bot-JS] WebSocket connection CLOSED. Code: ${event.code}`);
+            if (window.active_ws_connection === wsInstance) {
+                window.active_ws_connection = null;
+            }
+        });
+
+        wsInstance.addEventListener('error', (event) => {
+            console.error('[Bot-JS] WebSocket Error:', event);
+        });
+
+        return wsInstance;
+    };
+
+    // Define the function Python will call to send messages
+    window.py_send_chat_ws = function(message) {
+        if (!window.active_ws_connection || window.active_ws_connection.readyState !== 1) {
+            console.error('[Bot-JS] Send failed: WebSocket is not active.');
+            return false;
+        }
+        if (typeof window.msgpack?.encode !== 'function') {
+            console.error('[Bot-JS] Send failed: msgpack library not found on window.');
+            return false;
+        }
+        try {
+            // The game sends chat messages as a msgpack object with type 2
+            const encodedMessage = window.msgpack.encode({ type: 2, msg: message });
+            window.active_ws_connection.send(encodedMessage);
+            return true;
+        } catch (e) {
+            console.error('[Bot-JS] Error encoding or sending WebSocket message:', e);
+            return false;
+        }
+    };
+
+    // Part 2: Chat Observer (Reading Messages)
+    // ===========================================
+    // This is the same robust observer from your previous script.
+    
     // Reset the observer flag to allow re-injection
     window.isDrednotBotObserverActive = false;
     
@@ -66,7 +121,7 @@ MUTATION_OBSERVER_SCRIPT = """
 
     window.isDrednotBotObserverActive = true;
     console.log('[Bot-JS] Initializing Observer with Dynamic Command List...');
-    window.py_bot_events = [];
+    window.py_bot_events = []; // This is where events are pushed for Python to read
     const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
           spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
     const commandSet = new Set(allCommands);
@@ -74,6 +129,7 @@ MUTATION_OBSERVER_SCRIPT = """
     window.botSpamTracker = window.botSpamTracker || {};
     const targetNode = document.getElementById('chat-content');
     if (!targetNode) { return; }
+
     const callback = (mutationList, observer) => {
         const now = Date.now();
         for (const mutation of mutationList) {
@@ -117,7 +173,7 @@ MUTATION_OBSERVER_SCRIPT = """
     const observer = new MutationObserver(callback);
     observer.observe(targetNode, { childList: true });
     window.drednotBotMutationObserver = observer; // Store the observer instance
-    console.log('[Bot-JS] Advanced Spam Detection is now active.');
+    console.log('[Bot-JS] Advanced Spam Detection and WebSocket sender are now active.');
 """
 
 class InvalidKeyError(Exception): pass
@@ -141,19 +197,9 @@ def log_event(message):
 
 # --- BROWSER & FLASK SETUP ---
 def setup_driver():
-    """
-    THIS IS THE MODIFIED FUNCTION.
-    It now explicitly tells Selenium where to find the Chromium browser and its driver
-    inside the Docker container, preventing the 'Browser not found' error.
-    """
     logging.info("Launching headless browser for Docker environment...")
     chrome_options = Options()
-
-    # --- START OF CHANGE ---
-    # Explicitly set the path to the Chromium binary installed by 'apt-get' in the Dockerfile.
     chrome_options.binary_location = "/usr/bin/chromium"
-    # --- END OF CHANGE ---
-
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -164,17 +210,13 @@ def setup_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-
-    # --- START OF CHANGE ---
-    # Explicitly set the path to the chromedriver executable installed by 'apt-get'.
     service = Service(executable_path="/usr/bin/chromedriver")
-    # --- END OF CHANGE ---
-    
     return webdriver.Chrome(service=service, options=chrome_options)
 
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
+    # Flask HTML remains the same
     html = f"""
     <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10">
     <title>Drednot Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1,h2{{color:#4ec9b0;border-bottom:1px solid #4ec9b0;padding-bottom:5px;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;font-weight:bold;}}.status-warn{{color:#dccd85;font-weight:bold;}}.status-err{{color:#f44747;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;}}.label{{color:#9cdcfe;font-weight:bold;}}.btn{{background-color:#4ec9b0;color:#1e1e1e;border:none;padding:10px 15px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:1em;margin-top:20px;}}.btn:hover{{background-color:#63d8c1;}}</style></head>
@@ -183,11 +225,9 @@ def health_check():
     <p><span class="label">Current Ship ID:</span>{BOT_STATE['current_ship_id']}</p>
     <p><span class="label">Last Command:</span>{BOT_STATE['last_command_info']}</p>
     <p><span class="label">Last Message Sent:</span>{BOT_STATE['last_message_sent']}</p>
-    
     <form action="/update_commands" method="post">
         <button type="submit" class="btn">Refresh Commands Live</button>
     </form>
-
     <h2>Recent Events (Log)</h2><ul>{''.join(f'<li>{event}</li>' for event in BOT_STATE['event_log'])}</ul></div></body></html>
     """
     return Response(html, mimetype='text/html')
@@ -228,22 +268,31 @@ def queue_reply(message):
                 break
 
 def message_processor_thread():
+    """Processes the message queue, sending replies via direct WebSocket injection."""
     while True:
         message = message_queue.get()
         try:
             with driver_lock:
                 if driver:
-                    driver.execute_script(
-                        "const msg=arguments[0];const chatBox=document.getElementById('chat');const chatInp=document.getElementById('chat-input');const chatBtn=document.getElementById('chat-send');if(chatBox&&chatBox.classList.contains('closed')){chatBtn.click();}if(chatInp){chatInp.value=msg;}chatBtn.click();",
+                    # Execute our new, single-purpose WebSocket sending function
+                    success = driver.execute_script(
+                        "return window.py_send_chat_ws(arguments[0]);",
                         message
                     )
-            clean_msg = message[1:]
-            logging.info(f"SENT: {clean_msg}")
-            BOT_STATE["last_message_sent"] = clean_msg
+                    if success:
+                        clean_msg = message[1:] if message.startswith(ZWSP) else message
+                        logging.info(f"SENT (WS): {clean_msg}")
+                        BOT_STATE["last_message_sent"] = clean_msg
+                    else:
+                        logging.warning(f"Failed to send message via WebSocket: '{message}'")
+                        log_event("WARN: WebSocket send failed. Connection might be down.")
+
         except WebDriverException:
-            logging.warning("Message processor: WebDriver not available.")
+            logging.warning("Message processor: WebDriver not available. Message dropped.")
         except Exception as e:
             logging.error(f"Unexpected error in message processor: {e}")
+            traceback.print_exc()
+            
         time.sleep(MESSAGE_DELAY_SECONDS)
 
 # --- COMMAND PROCESSING ---
@@ -273,9 +322,7 @@ def process_commands_list_call(username):
         queue_reply(f"@{username} Fetching command list from server...")
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
         response = requests.get(
-            endpoint_url,
-            headers={"x-api-key": API_KEY},
-            timeout=10
+            endpoint_url, headers={"x-api-key": API_KEY}, timeout=10
         )
         response.raise_for_status()
         command_list = response.json() 
@@ -284,7 +331,6 @@ def process_commands_list_call(username):
         for cmd_string in command_list:
             queue_reply(cmd_string)
         queue_reply("------------------------------------")
-
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to fetch command list: {e}")
         queue_reply(f"@{username} Sorry, couldn't fetch the command list. The server might be down.")
@@ -300,6 +346,7 @@ def reset_inactivity_timer():
     inactivity_timer.start()
 
 def attempt_soft_rejoin():
+    # This function remains largely the same
     log_event("Game inactivity detected. Attempting proactive rejoin.")
     BOT_STATE["status"] = "Proactive Rejoin..."
     global driver
@@ -328,7 +375,6 @@ def attempt_soft_rejoin():
             logging.info("✅ Proactive rejoin successful!")
             log_event("Proactive rejoin successful.")
             BOT_STATE["status"] = "Running"
-            # After rejoining, re-inject the observer with the current command list
             queue_browser_update()
             reset_inactivity_timer()
     except Exception as e:
@@ -337,14 +383,12 @@ def attempt_soft_rejoin():
         if driver: driver.quit()
 
 def fetch_command_list():
-    """Fetches command list from server and updates the global variable. Returns success."""
     global SERVER_COMMAND_LIST
     try:
         log_event("Fetching command list from server...")
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
         response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
         response.raise_for_status()
-        
         full_command_strings = response.json()
         SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
         SERVER_COMMAND_LIST.append('verify')
@@ -355,11 +399,11 @@ def fetch_command_list():
         return False
 
 def queue_browser_update():
-    """Queues an action to re-inject the JS observer with the current command list."""
+    """Queues an action to re-inject the JS client with the current command list."""
     def update_action(driver_instance):
-        log_event("Injecting/updating chat observer...")
+        log_event("Injecting/updating JS client (WS Sender + Observer)...")
         driver_instance.execute_script(
-            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
         )
         queue_reply("Commands have been updated live.")
@@ -378,6 +422,7 @@ def start_bot(use_key_login):
         wait = WebDriverWait(driver, 15)
         
         try:
+            # Login logic remains the same
             btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal-container .btn-green")))
             driver.execute_script("arguments[0].click();", btn)
             logging.info("Clicked 'Accept' on notice.")
@@ -411,12 +456,13 @@ def start_bot(use_key_login):
         if not fetch_command_list():
             raise RuntimeError("Initial command fetch failed. Cannot start bot.")
 
-        log_event("Injecting initial chat observer...")
+        log_event("Injecting initial Unified JS Client (WS + Observer)...")
         driver.execute_script(
-            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
         )
 
+        # Ship ID acquisition logic remains the same
         log_event("Proactively scanning for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
         found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
@@ -444,19 +490,18 @@ def start_bot(use_key_login):
                 raise RuntimeError(error_message)
 
     BOT_STATE["status"] = "Running"
-    queue_reply("Bot online.")
+    queue_reply("Bot online. Now using WebSocket communication.")
     reset_inactivity_timer()
     logging.info(f"Event-driven chat monitor active. Polling every {MAIN_LOOP_POLLING_INTERVAL_SECONDS}s.")
     
+    # Main loop remains the same, as it's just processing events from the JS side
     while True:
         try:
-            # Check the action queue first
             try:
                 while not action_queue.empty():
                     action_to_run = action_queue.get_nowait()
                     with driver_lock:
-                        if driver:
-                            action_to_run(driver) 
+                        if driver: action_to_run(driver) 
             except queue.Empty:
                 pass
 
@@ -475,12 +520,10 @@ def start_bot(use_key_login):
                         command_str = f"!{cmd} {' '.join(args)}"
                         logging.info(f"RECV: '{command_str}' from {user}")
                         BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
-
                         if cmd == "commands":
                             command_executor.submit(process_commands_list_call, user)
                         else:
                             command_executor.submit(process_api_call, cmd, user, args)
-                            
                     elif event['type'] == 'spam_detected':
                         username, command = event['username'], event['command']
                         log_event(f"SPAM: Timed out '{username}' for {SPAM_TIMEOUT_SECONDS}s for spamming '!{command}'.")
@@ -498,6 +541,7 @@ def main():
     restart_count = 0
     last_restart_time = time.time()
 
+    # Restart logic remains the same
     while True:
         current_time = time.time()
         if current_time - last_restart_time < 3600:
@@ -529,10 +573,8 @@ def main():
             if inactivity_timer:
                 inactivity_timer.cancel()
             if driver:
-                try:
-                    driver.quit()
-                except:
-                    pass
+                try: driver.quit()
+                except: pass
             driver = None
             time.sleep(5)
 
