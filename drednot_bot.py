@@ -33,14 +33,13 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 BOT_SERVER_URL = os.environ.get("BOT_SERVER_URL")
 API_KEY = 'drednot123'
 SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
-
-ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT' # Replace with your key if needed
+ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT'
 
 # Bot Behavior
 MESSAGE_DELAY_SECONDS = 0.2
 ZWSP = '\u200B'
 INACTIVITY_TIMEOUT_SECONDS = 2 * 60
-MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.1 # Slightly increased to reduce idle CPU
+MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.1
 MAX_WORKER_THREADS = 10
 
 # Spam Control
@@ -51,7 +50,6 @@ SPAM_RESET_SECONDS = 5
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
 if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment variable is not set!"); exit(1)
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
@@ -107,8 +105,6 @@ UNIFIED_CLIENT_SCRIPT = """
     if (!targetNode) return;
     const callback = (mutationList, observer) => {
         const now = Date.now();
-        // *** NEW JS MEMORY LEAK FIX ***
-        // Every 50 commands, clean up trackers for users not seen in 30 minutes.
         window.botCmdCounter = (window.botCmdCounter || 0) + 1;
         if (window.botCmdCounter % 50 === 0) {
             const cleanupTime = now - (1000 * 60 * 30); // 30 minutes
@@ -127,7 +123,6 @@ UNIFIED_CLIENT_SCRIPT = """
             }
             if(cleanedCount > 0) console.log(`[Bot-JS] Cleaned up ${cleanedCount} old user entries from trackers.`);
         }
-        // *** END OF FIX ***
         for (const mutation of mutationList) {
             if (mutation.type !== 'childList') continue;
             for (const node of mutation.addedNodes) {
@@ -213,7 +208,6 @@ def setup_driver():
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
-    # Flask HTML remains the same
     html = f"""
     <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10">
     <title>Drednot Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1,h2{{color:#4ec9b0;border-bottom:1px solid #4ec9b0;padding-bottom:5px;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;font-weight:bold;}}.status-warn{{color:#dccd85;font-weight:bold;}}.status-err{{color:#f44747;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;}}.label{{color:#9cdcfe;font-weight:bold;}}.btn{{background-color:#4ec9b0;color:#1e1e1e;border:none;padding:10px 15px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:1em;margin-top:20px;}}.btn:hover{{background-color:#63d8c1;}}</style></head>
@@ -265,7 +259,6 @@ def queue_reply(message):
                 break
 
 def message_processor_thread():
-    """Processes the message queue, sending replies via direct WebSocket injection."""
     while True:
         message = message_queue.get()
         try:
@@ -286,7 +279,7 @@ def message_processor_thread():
             traceback.print_exc()
         time.sleep(MESSAGE_DELAY_SECONDS)
 
-# --- COMMAND PROCESSING (No changes needed here) ---
+# --- COMMAND PROCESSING ---
 def process_api_call(command, username, args):
     command_str = f"!{command} {' '.join(args)}"
     try:
@@ -338,7 +331,32 @@ def attempt_soft_rejoin():
     BOT_STATE["status"] = "Proactive Rejoin..."
     global driver
     try:
-        # ... (This function's logic is fine, no changes needed) ...
+        with driver_lock:
+            ship_id = BOT_STATE.get('current_ship_id')
+            if not ship_id or ship_id == 'N/A': raise ValueError("Cannot rejoin, no known Ship ID.")
+            try:
+                driver.find_element(By.CSS_SELECTOR, "#disconnect-popup button").click()
+                logging.info("Rejoin: Clicked disconnect pop-up.")
+            except:
+                try:
+                    driver.find_element(By.ID, "exit_button").click()
+                    logging.info("Rejoin: Exiting ship normally.")
+                except:
+                    logging.info("Rejoin: Not in game and no pop-up. Assuming at main menu.")
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
+            logging.info(f"Rejoin: At main menu. Searching for ship: {ship_id}")
+            clicked = driver.execute_script("const sid=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}document.querySelector('#shipyard section:nth-of-type(3) .btn-small')?.click();return false", ship_id)
+            if not clicked:
+                time.sleep(0.5)
+                clicked = driver.execute_script("const sid=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}return false", ship_id)
+            if not clicked: raise RuntimeError(f"Could not find ship {ship_id} in list.")
+            wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
+            logging.info("✅ Proactive rejoin successful!")
+            log_event("Proactive rejoin successful.")
+            BOT_STATE["status"] = "Running"
+            queue_browser_update()
+            reset_inactivity_timer()
     except Exception as e:
         log_event(f"Rejoin FAILED: {e}")
         logging.error(f"Proactive rejoin failed: {e}. Triggering full restart.")
@@ -347,13 +365,20 @@ def attempt_soft_rejoin():
 def fetch_command_list():
     global SERVER_COMMAND_LIST
     try:
-        # ... (This function's logic is fine, no changes needed) ...
+        log_event("Fetching command list from server...")
+        endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
+        response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
+        response.raise_for_status()
+        full_command_strings = response.json()
+        SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
+        SERVER_COMMAND_LIST.append('verify')
+        log_event(f"Successfully processed {len(SERVER_COMMAND_LIST)} commands.")
+        return True
     except Exception as e:
         log_event(f"CRITICAL: Failed to fetch command list: {e}")
         return False
 
 def queue_browser_update():
-    """Queues an action to re-inject the JS client with the current command list."""
     def update_action(driver_instance):
         log_event("Injecting/updating JS client (WS Sender + Observer)...")
         driver_instance.execute_script(
@@ -371,10 +396,75 @@ def start_bot(use_key_login):
     driver = setup_driver()
     
     with driver_lock:
-        # ... (This function's logic is mostly fine) ...
-        # (Login logic, script injection, and ship ID acquisition remain the same)
-        # ...
-        pass
+        logging.info(f"Navigating to invite link...")
+        driver.get(SHIP_INVITE_LINK)
+        wait = WebDriverWait(driver, 15)
+        
+        try:
+            btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal-container .btn-green")))
+            driver.execute_script("arguments[0].click();", btn)
+            logging.info("Clicked 'Accept' on notice.")
+            
+            if ANONYMOUS_LOGIN_KEY and use_key_login:
+                log_event("Attempting login with hardcoded key.")
+                link = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Restore old anonymous key')]")))
+                driver.execute_script("arguments[0].click();", link)
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY)
+                submit_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]")))
+                driver.execute_script("arguments[0].click();", submit_btn)
+                wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]")))
+                wait.until(EC.any_of(EC.presence_of_element_located((By.ID, "chat-input")), EC.presence_of_element_located((By.XPATH, "//h2[text()='Login Failed']"))))
+                if driver.find_elements(By.XPATH, "//h2[text()='Login Failed']"):
+                    raise InvalidKeyError("Login Failed! Key may be invalid.")
+                log_event("✅ Successfully logged in with key.")
+            else:
+                log_event("Playing as new guest.")
+                play_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//button[contains(., 'Play Anonymously')]")))
+                driver.execute_script("arguments[0].click();", play_btn)
+
+        except TimeoutException:
+            logging.warning("Login procedure timed out. Assuming already in-game.")
+            log_event("Login timeout; assuming in-game.")
+        except Exception as e:
+            log_event(f"Login failed critically: {e}")
+            raise
+
+        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
+        
+        if not fetch_command_list():
+            raise RuntimeError("Initial command fetch failed. Cannot start bot.")
+
+        log_event("Injecting initial Unified JS Client (WS + Observer)...")
+        driver.execute_script(
+            UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
+        )
+
+        log_event("Proactively scanning for Ship ID...")
+        PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
+        found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
+        
+        if found_id:
+            BOT_STATE["current_ship_id"] = found_id
+            log_event(f"Confirmed Ship ID via scan: {found_id}")
+        else:
+            log_event("No existing ID found. Waiting for live event...")
+            start_time = time.time()
+            ship_id_found = False
+            while time.time() - start_time < 15:
+                new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+                for event in new_events:
+                    if event['type'] == 'ship_joined':
+                        BOT_STATE["current_ship_id"] = event['id']
+                        ship_id_found = True
+                        log_event(f"Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}")
+                        break
+                if ship_id_found: break
+                time.sleep(0.5)
+            if not ship_id_found:
+                error_message = "Failed to get Ship ID via scan or live event."
+                log_event(f"CRITICAL: {error_message}")
+                raise RuntimeError(error_message)
 
     BOT_STATE["status"] = "Running"
     queue_reply("Bot online. Now using WebSocket communication.")
@@ -383,8 +473,41 @@ def start_bot(use_key_login):
     
     while True:
         try:
-            # ... (Main event loop is fine, no changes needed) ...
-            pass
+            # Check the action queue first
+            try:
+                while not action_queue.empty():
+                    action_to_run = action_queue.get_nowait()
+                    with driver_lock:
+                        if driver:
+                            action_to_run(driver) 
+            except queue.Empty:
+                pass
+
+            # Poll for events from the browser
+            with driver_lock:
+                if not driver: break
+                new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+            
+            if new_events:
+                reset_inactivity_timer()
+                for event in new_events:
+                    if event['type'] == 'ship_joined' and event['id'] != BOT_STATE["current_ship_id"]:
+                        BOT_STATE["current_ship_id"] = event['id']
+                        log_event(f"Switched to new ship: {BOT_STATE['current_ship_id']}")
+                    elif event['type'] == 'command':
+                        cmd, user, args = event['command'], event['username'], event['args']
+                        command_str = f"!{cmd} {' '.join(args)}"
+                        logging.info(f"RECV: '{command_str}' from {user}")
+                        BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
+
+                        if cmd == "commands":
+                            command_executor.submit(process_commands_list_call, user)
+                        else:
+                            command_executor.submit(process_api_call, cmd, user, args)
+                            
+                    elif event['type'] == 'spam_detected':
+                        username, command = event['username'], event['command']
+                        log_event(f"SPAM: Timed out '{username}' for {SPAM_TIMEOUT_SECONDS}s for spamming '!{command}'.")
         except WebDriverException as e:
             logging.error(f"WebDriver exception in main loop. Assuming disconnect: {e.msg}")
             raise
@@ -392,35 +515,25 @@ def start_bot(use_key_login):
 
 # --- NEW FUNCTION TO PREVENT MEMORY LEAKS ---
 def cleanup_processes():
-    """
-    Forcefully finds and terminates any leftover chrome or chromedriver processes.
-    This is crucial for preventing memory leaks from zombie processes on restart.
-    """
     logging.info("Running cleanup task to find and kill zombie processes...")
     killed_count = 0
-    # Define process names to target
     target_processes = ['chrome', 'chromium', 'chromedriver']
     
-    # Iterate over all running processes
     for proc in psutil.process_iter(['pid', 'name']):
         try:
             proc_name = proc.info['name'].lower()
-            # Check if the process name contains any of our targets
             if any(target in proc_name for target in target_processes):
                 logging.warning(f"Found lingering process: {proc.info['name']} (PID: {proc.info['pid']}). Terminating.")
                 p = psutil.Process(proc.info['pid'])
-                p.terminate()  # Ask it to terminate gracefully
+                p.terminate()
                 killed_count += 1
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            # Process might have been killed already or we lack permissions
             continue
         except Exception as e:
             logging.error(f"Error during process cleanup for PID {proc.info.get('pid', '?')}: {e}")
 
-    # Give gracefully terminated processes a moment to exit
     if killed_count > 0:
         time.sleep(2)
-        # Check again and kill forcefully if they still exist
         for proc in psutil.process_iter(['pid', 'name']):
             try:
                 proc_name = proc.info['name'].lower()
@@ -476,14 +589,12 @@ def main():
                 inactivity_timer.cancel()
             if driver:
                 try:
-                    # Still attempt a graceful quit first
                     driver.quit()
                 except Exception as e:
                     logging.warning(f"driver.quit() failed with an error: {e}")
             driver = None
             
-            # ** ADD THE FORCEFUL CLEANUP CALL HERE **
-            # This will run after every crash or restart, ensuring a clean slate.
+            # This forceful cleanup is the key to preventing memory leaks
             cleanup_processes()
             
             time.sleep(5)
