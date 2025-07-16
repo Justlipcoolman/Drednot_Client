@@ -1,5 +1,7 @@
 # drednot_bot.py
-# Final version, corrected to inject msgpack library dependency, fixing the send error.
+# Final version, optimized for Render/Docker.
+# This version dynamically fetches the command list from the server
+# and allows for live updates via the web UI using a robust action queue.
 
 import os
 import queue
@@ -15,8 +17,6 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin 
 
-import psutil
-
 from flask import Flask, Response, request, redirect, url_for
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -30,13 +30,14 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 BOT_SERVER_URL = os.environ.get("BOT_SERVER_URL")
 API_KEY = 'drednot123'
 SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
-ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT'
+
+ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT' # Replace with your key if needed
 
 # Bot Behavior
 MESSAGE_DELAY_SECONDS = 0.2
 ZWSP = '\u200B'
 INACTIVITY_TIMEOUT_SECONDS = 2 * 60
-MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.1
+MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.05
 MAX_WORKER_THREADS = 10
 
 # Spam Control
@@ -47,84 +48,34 @@ SPAM_RESET_SECONDS = 5
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
 if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment variable is not set!"); exit(1)
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
 if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
+# --- JAVASCRIPT INJECTION SCRIPT ---
+MUTATION_OBSERVER_SCRIPT = """
+    // Reset the observer flag to allow re-injection
+    window.isDrednotBotObserverActive = false;
+    
+    // Disconnect any old observer to prevent duplicates
+    if (window.drednotBotMutationObserver) {
+        window.drednotBotMutationObserver.disconnect();
+        console.log('[Bot-JS] Disconnected old observer.');
+    }
 
-# --- NEW: MSGPACK JAVASCRIPT LIBRARY ---
-MSGPACK_JS_LIBRARY = """
-!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?t(exports):"function"==typeof define&&define.amd?define(["exports"],t):t((e="undefined"!=typeof globalThis?globalThis:e||self).msgpack={})}(this,(function(e){"use strict";const t=new Uint8Array(0);class n{constructor(e,t){this.type=e,this.data=t}}class r{constructor(){this.typeToData=new Map,this.dataToType=new Map}add({type:e,data:t,encode:r,decode:o}){const i=this.typeToData.get(e),s=this.dataToType.get(t);if(i&&s)throw new Error(`The type ${e} is already registered to ${t}, and the data is already registered to ${i}`);if(i)throw new Error(`The type ${e} is already registered to ${i}`);if(s)throw new Error(`The data is already registered to ${s}`);this.typeToData.set(e,t),this.dataToType.set(t,{type:e,encode:r,decode:o})}tryToEncode(e,t){const r=Object.getPrototypeOf(e);if(null==r)return null;const o=this.dataToType.get(r);return o?new n(o.type,o.encode(e,t)):null}}const o=new r;o.add({type:-1,data:Date.prototype,encode:e=>{const n=e.getTime(),r=Math.floor(n/4294967296),o=4294967295&n;if(r>0){const e=new Uint8Array(8);return(new DataView(e.buffer)).setBigUint64(0,BigInt(n),!1),e}if(4294967295&(o|4294967296*r)>>>0!==o)throw new Error("32-bit date-time is not supported yet");{const n=new Uint8Array(4);return(new DataView(n.buffer)).setUint32(0,o,!1),n}},decode(e){const t=new DataView(e.buffer,e.byteOffset,e.byteLength);switch(e.byteLength){case 4:return new Date(1e3*t.getUint32(0,!1));case 8:{const e=t.getBigUint64(0,!1);return new Date(Number(e))}case 12:return new Date(1e3*Number(t.getBigInt64(4,!1))+t.getUint32(0,!1)/1e6);default:throw new Error(`Unrecognized data size for timestamp: ${e.byteLength}`)}}});const i={maxStrLength:4294967295,maxBinLength:4294967295,maxArrayLength:4294967295,maxMapLength:4294967295,maxExtLength:4294967295};class s{constructor(e){this.options=Object.assign({},i,e),this.extensionCodec=this.options.extensionCodec??o,this.context=this.options.context,this.pos=0;const t=this.options.initialBufferSize??2048;this.buffer=new Uint8Array(t),this.view=new DataView(this.buffer.buffer)}getUint8Array(){return this.buffer.subarray(0,this.pos)}ensureBufferSize(e){const t=this.buffer.byteLength;if(t<this.pos+e){const n=Math.max(2*t,this.pos+e),r=new Uint8Array(n);r.set(this.buffer),this.buffer=r,this.view=new DataView(r.buffer)}}pack(e){if(null==e)return this.packNil();if(!1===e)return this.packBoolean(!1);if(!0===e)return this.packBoolean(!0);if("number"==typeof e)return this.packNumber(e);if("bigint"==typeof e)return this.packBigInt(e);if("string"==typeof e)return this.packString(e);if(Array.isArray(e))return this.packArray(e);if(e instanceof Uint8Array)return this.packBinary(e);if("object"==typeof e)return this.packObject(e);throw new Error("Unrecognized object: "+Object.prototype.toString.apply(e))}packNil(){this.ensureBufferSize(1),this.view.setUint8(this.pos++,192)}packBoolean(e){this.ensureBufferSize(1),e?this.view.setUint8(this.pos++,195):this.view.setUint8(this.pos++,194)}packNumber(e){if(Number.isSafeInteger(e)&&!this.options.forceFloat32&&!this.options.forceFloat64&&!this.options.forceIntegerToFloat){if(e>=0)return e<128?this.packInt(e):e<256?this.packU8(e):e<65536?this.packU16(e):this.packU32(e);if(e>=-32)return this.packInt(e);if(e>=-128)return this.packI8(e);if(e>=-32768)return this.packI16(e);if(e>=-2147483648)return this.packI32(e)}this.options.forceFloat32?this.packF32(e):this.packF64(e)}packBigInt(e){if(e>=BigInt(0)){if(e<BigInt(1<<64))return this.packU64(e)}else if(e>=BigInt(-(1<<63)))return this.packI64(e);const t=this.extensionCodec.tryToEncode(e,this.context);if(null!=t)return this.packExtension(t);throw new Error("The value is too large for bigint: "+e)}writeU8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,204),this.view.setUint8(this.pos++,e)}writeU16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,205),this.view.setUint16(this.pos,e,!1),this.pos+=2}writeU32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,206),this.view.setUint32(this.pos,e,!1),this.pos+=4}packU8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,204),this.view.setUint8(this.pos++,e)}packU16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,205),this.view.setUint16(this.pos,e,!1),this.pos+=2}packU32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,206),this.view.setUint32(this.pos,e,!1),this.pos+=4}packU64(e){this.ensureBufferSize(9),this.view.setUint8(this.pos++,207),this.view.setBigUint64(this.pos,e,!1),this.pos+=8}packI8(e){this.ensureBufferSize(2),this.view.setUint8(this.pos++,208),this.view.setInt8(this.pos++,e)}packI16(e){this.ensureBufferSize(3),this.view.setUint8(this.pos++,209),this.view.setInt16(this.pos,e,!1),this.pos+=2}packI32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,210),this.view.setInt32(this.pos,e,!1),this.pos+=4}packI64(e){this.ensureBufferSize(9),this.view.setUint8(this.pos++,211),this.view.setBigInt64(this.pos,e,!1),this.pos+=8}packF32(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,202),this.view.setFloat32(this.pos,e,!1),this.pos+=4}packF64(e){this.ensureBufferSize(5),this.view.setUint8(this.pos++,203),this.view.setFloat64(this.pos,e,!1),this.pos+=4}packInt(e){this.ensureBufferSize(1),this.view.setUint8(this.pos++,e)}packString(e){const t=this.options.maxStrLength;if(e.length>t)throw new Error(`String is too long: ${e.length} > ${t}`);const n=4*e.length;this.ensureBufferSize(5+n);const r=TEXT_ENCODER.encode(e),o=r.length;if(o<32)this.ensureBufferSize(1+o),this.view.setUint8(this.pos++,160|o);else if(o<256){if(this.ensureBufferSize(2+o),this.view.setUint8(this.pos++,217),this.view.setUint8(this.pos++,o),o>t)throw new Error(`String is too long: ${o} > ${t}`)}else if(o<65536){if(this.ensureBufferSize(3+o),this.view.setUint8(this.pos++,218),this.view.setUint16(this.pos,o,!1),this.pos+=2,o>t)throw new Error(`String is too long: ${o} > ${t}`)}else{if(!(o<4294967296))throw new Error("Too long string: "+o+" bytes in UTF-8");if(this.ensureBufferSize(5+o),this.view.setUint8(this.pos++,219),this.view.setUint32(this.pos,o,!1),this.pos+=4,o>t)throw new Error(`String is too long: ${o} > ${t}`)}this.buffer.set(r,this.pos),this.pos+=o}packArray(e){const t=e.length;if(t<16)this.ensureBufferSize(1),this.view.setUint8(this.pos++,144|t);else if(t<65536)this.ensureBufferSize(3),this.view.setUint8(this.pos++,220),this.view.setUint16(this.pos,t,!1),this.pos+=2;else{if(!(t<4294967296))throw new Error("Too large array: "+t);this.ensureBufferSize(5),this.view.setUint8(this.pos++,221),this.view.setUint32(this.pos,t,!1),this.pos+=4}for(const n of e)this.pack(n)}packBinary(e){const t=e.length,n=this.options.maxBinLength;if(t>n)throw new Error(`Binary is too long: ${t} > ${n}`);if(t<256)this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,196),this.view.setUint8(this.pos++,t);else if(t<65536)this.ensureBufferSize(3+t),this.view.setUint8(this.pos++,197),this.view.setUint16(this.pos,t,!1),this.pos+=2;else{if(!(t<4294967296))throw new Error("Too large binary: "+t);this.ensureBufferSize(5+t),this.view.setUint8(this.pos++,198),this.view.setUint32(this.pos,t,!1),this.pos+=4}this.buffer.set(e,this.pos),this.pos+=t}packExtension(e){const t=e.data.length,n=this.options.maxExtLength;if(t>n)throw new Error(`Extension is too long: ${t} > ${n}`);1===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,212)):2===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,213)):4===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,214)):8===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,215)):16===t?(this.ensureBufferSize(2+t),this.view.setUint8(this.pos++,216)):t<256?(this.ensureBufferSize(3+t),this.view.setUint8(this.pos++,199),this.view.setUint8(this.pos++,t)):t<65536?(this.ensureBufferSize(4+t),this.view.setUint8(this.pos++,200),this.view.setUint16(this.pos,t,!1),this.pos+=2):t<4294967296&&(this.ensureBufferSize(6+t),this.view.setUint8(this.pos++,201),this.view.setUint32(this.pos,t,!1),this.pos+=4),this.view.setInt8(this.pos++,e.type),this.buffer.set(e.data,this.pos),this.pos+=t}packObject(e){const t=this.extensionCodec.tryToEncode(e,this.context);if(null!=t)return this.packExtension(t);const n=Object.keys(e).filter(t=>void 0!==e[t]),r=n.length,o=this.options.maxMapLength;if(r>o)throw new Error(`Map is too large: ${r} > ${o}`);if(this.options.sortKeys){const e=n.map(e=>[TEXT_ENCODER.encode(e),e]);e.sort(([e],[t])=>{for(let n=0;n<e.length;n++)if(n>=t.length)return 1;else{const r=e[n]-t[n];if(0!==r)return r}return e.length-t.length});const t=[];for(const[n,r]of e)t.push(r);return this.packObjectByOrder(e,t)}this.packMapHeader(r);for(const t of n)this.pack(t),this.pack(e[t])}packMapHeader(e){if(e<16)this.ensureBufferSize(1),this.view.setUint8(this.pos++,128|e);else if(e<65536)this.ensureBufferSize(3),this.view.setUint8(this.pos++,222),this.view.setUint16(this.pos,e,!1),this.pos+=2;else{if(!(e<4294967296))throw new Error("Too large map: "+e);this.ensureBufferSize(5),this.view.setUint8(this.pos++,223),this.view.setUint32(this.pos,e,!1),this.pos+=4}}packObjectByOrder(e,t){this.packMapHeader(e.length);for(const n of t)this.pack(n),this.pack(e[n])}}const TEXT_ENCODER=new TextEncoder;class c extends Error{constructor(e){super(e),Object.setPrototypeOf(this,new.target.prototype),this.name=new.target.name}}const a={maxStrLength:4294967295,maxBinLength:4294967295,maxArrayLength:4294967295,maxMapLength:4294967295,maxExtLength:4294967295};class u{constructor(e){this.options=Object.assign({},a,e),this.extensionCodec=this.options.extensionCodec??o,this.context=this.options.context,this.pos=0,this.buffer=t}decode(e){this.setBuffer(e);try{return this.doDecode()}catch(e){if(e instanceof c)throw e;throw new c(e.message)}}doDecode(){const e=this.readHeadByte();return e>=224?e-256:e<=127?e:e>=128&&e<=143?this.decodeMap(e-128):e>=144&&e<=159?this.decodeArray(e-144):e>=160&&e<=191?this.decodeStr(e-160):192===e?null:193===e?this.decodeNeverUsed():194===e?!1:195===e?!0:196===e?this.decodeBin(this.readU8()):197===e?this.decodeBin(this.readU16()):198===e?this.decodeBin(this.readU32()):199===e?this.decodeExt(this.readU8()):200===e?this.decodeExt(this.readU16()):201===e?this.decodeExt(this.readU32()):202===e?this.readF32():203===e?this.readF64():204===e?this.readU8():205===e?this.readU16():206===e?this.readU32():207===e?this.readU64():208===e?this.readI8():209===e?this.readI16():210===e?this.readI32():211===e?this.readI64():212===e?this.decodeExt(1):213===e?this.decodeExt(2):214===e?this.decodeExt(4):215===e?this.decodeExt(8):216===e?this.decodeExt(16):217===e?this.decodeStr(this.readU8()):218===e?this.decodeStr(this.readU16()):219===e?this.decodeStr(this.readU32()):220===e?this.decodeArray(this.readU16()):221===e?this.decodeArray(this.readU32()):222===e?this.decodeMap(this.readU16()):223===e?this.decodeMap(this.readU32()):(()=>{throw new c(`Unrecognized header byte: ${e}`)})()}setBuffer(e){e instanceof ArrayBuffer?this.buffer=new Uint8Array(e):e instanceof Uint8Array?this.buffer=e:(()=>{if(!ArrayBuffer.isView(e))throw new Error("buffer must be an ArrayBuffer or an ArrayBufferView");this.buffer=new Uint8Array(e.buffer,e.byteOffset,e.byteLength)})(),this.view=new DataView(this.buffer.buffer),this.pos=0}readHeadByte(){return this.view.getUint8(this.pos++)}readU8(){const e=this.view.getUint8(this.pos);return this.pos+=1,e}readU16(){const e=this.view.getUint16(this.pos,!1);return this.pos+=2,e}readU32(){const e=this.view.getUint32(this.pos,!1);return this.pos+=4,e}readU64(){const e=this.view.getBigUint64(this.pos,!1);return this.pos+=8,e}readI8(){const e=this.view.getInt8(this.pos);return this.pos+=1,e}readI16(){const e=this.view.getInt16(this.pos,!1);return this.pos+=2,e}readI32(){const e=this.view.getInt32(this.pos,!1);return this.pos+=4,e}readI64(){const e=this.view.getBigInt64(this.pos,!1);return this.pos+=8,e}readF32(){const e=this.view.getFloat32(this.pos,!1);return this.pos+=4,e}readF64(){const e=this.view.getFloat64(this.pos,!1);return this.pos+=8,e}decodeStr(e){const t=this.options.maxStrLength;if(e>t)throw new Error(`String is too long: ${e} > ${t}`);const n=this.pos;this.pos+=e;try{return TEXT_DECODER_RUNTIME.decode(this.buffer.subarray(n,this.pos))}catch(t){if(!(t instanceof TypeError))throw t;const e=new TextDecoder(this.options.string_decoder||"utf-8",{fatal:!1});return e.decode(this.buffer.subarray(n,this.pos))}}decodeBin(e){const t=this.options.maxBinLength;if(e>t)throw new Error(`Binary is too long: ${e} > ${t}`);const n=this.pos,r=this.buffer.subarray(n,n+e);return this.pos+=e,r}decodeArray(e){const t=this.options.maxArrayLength;if(e>t)throw new Error(`Array is too long: ${e} > ${t}`);const n=[];for(let t=0;t<e;t++){const e=this.doDecode();n.push(e)}return n}decodeMap(e){const t=this.options.maxMapLength;if(e>t)throw new Error(`Map is too long: ${e} > ${t}`);const n=Object.create(null);for(let t=0;t<e;t++){const e=this.doDecode();if("string"!=typeof e&&"number"!=typeof e)throw new c("The key of a map must be a string or a number");const r=this.doDecode();n[e]=r}return n}decodeExt(e){const t=this.options.maxExtLength;if(e>t)throw new Error(`Extension is too long: ${e} > ${t}`);const r=this.readI8(),o=this.decodeBin(e);return this.extensionCodec.decode(o,r,this.context)}decodeNeverUsed(){throw new c("Invalid byte code: 0xc1 is reserved")}}{const e="undefined"!=typeof process&&null!=process?.versions?.node;let t;const n="undefined"!=typeof TextDecoder&&!e;t=n?new TextDecoder("utf-8",{fatal:!0}):null;const r=e=>n?t.decode(e):Buffer.from(e).toString("utf-8");var TEXT_DECODER_RUNTIME={decode:r}}e.DecodeError=c,e.Encoder=s,e.ExtensionCodec=r,e.ExtData=n,e.decode=(e,t)=>{const n=new u(t);return n.decode(e)},e.encode=(e,t)=>{const n=new s(t);return n.pack(e),n.getUint8Array()},Object.defineProperty(e,"__esModule",{value:!0})}));
-"""
-
-UNIFIED_CLIENT_SCRIPT = """
-    // Part 1: WebSocket Capture and Sender
-    console.log('[Bot-JS] Initializing WebSocket Interceptor...');
-    window.active_ws_connection = null;
-    const OriginalWebSocket = window.WebSocket;
-    window.WebSocket = function(url, protocols) {
-        const wsInstance = new OriginalWebSocket(url, protocols);
-        console.log('[Bot-JS] Game WebSocket created. Capturing instance.');
-        wsInstance.addEventListener('open', () => {
-            console.log('[Bot-JS] WebSocket connection is OPEN.');
-            window.active_ws_connection = wsInstance;
-        });
-        wsInstance.addEventListener('close', (event) => {
-            console.warn(`[Bot-JS] WebSocket connection CLOSED. Code: ${event.code}`);
-            if (window.active_ws_connection === wsInstance) window.active_ws_connection = null;
-        });
-        wsInstance.addEventListener('error', (event) => console.error('[Bot-JS] WebSocket Error:', event));
-        return wsInstance;
-    };
-    window.py_send_chat_ws = function(message) {
-        if (!window.active_ws_connection || window.active_ws_connection.readyState !== 1) {
-            console.error('[Bot-JS] Send failed: WebSocket is not active.');
-            return false;
-        }
-        if (typeof window.msgpack?.encode !== 'function') {
-            console.error('[Bot-JS] Send failed: msgpack library not found on window object.');
-            return false;
-        }
-        try {
-            const encodedMessage = window.msgpack.encode({ type: 2, msg: message });
-            window.active_ws_connection.send(encodedMessage);
-            return true;
-        } catch (e) {
-            console.error('[Bot-JS] Error encoding or sending WebSocket message:', e);
-            return false;
-        }
-    };
-    // Part 2: Chat Observer (Reading Messages)
-    if (window.drednotBotMutationObserver) window.drednotBotMutationObserver.disconnect();
     window.isDrednotBotObserverActive = true;
     console.log('[Bot-JS] Initializing Observer with Dynamic Command List...');
     window.py_bot_events = [];
-    const [zwsp, allCommands, cooldownMs, spamStrikeLimit, spamTimeoutMs, spamResetMs] = arguments;
+    const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
+          spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
     const commandSet = new Set(allCommands);
     window.botUserCooldowns = window.botUserCooldowns || {};
     window.botSpamTracker = window.botSpamTracker || {};
     const targetNode = document.getElementById('chat-content');
-    if (!targetNode) return;
+    if (!targetNode) { return; }
     const callback = (mutationList, observer) => {
         const now = Date.now();
-        window.botCmdCounter = (window.botCmdCounter || 0) + 1;
-        if (window.botCmdCounter % 50 === 0) {
-            const cleanupTime = now - (1000 * 60 * 30); // 30 minutes
-            let cleanedCount = 0;
-            for (const user in window.botSpamTracker) {
-                if (window.botSpamTracker[user].lastTime < cleanupTime) {
-                    delete window.botSpamTracker[user];
-                    cleanedCount++;
-                }
-            }
-            for (const user in window.botUserCooldowns) {
-                if (window.botUserCooldowns[user] < cleanupTime) {
-                    delete window.botUserCooldowns[user];
-                    cleanedCount++;
-                }
-            }
-            if(cleanedCount > 0) console.log(`[Bot-JS] Cleaned up ${cleanedCount} old user entries from trackers.`);
-        }
         for (const mutation of mutationList) {
             if (mutation.type !== 'childList') continue;
             for (const node of mutation.addedNodes) {
@@ -152,11 +103,10 @@ UNIFIED_CLIENT_SCRIPT = """
                 const lastCmdTime = window.botUserCooldowns[username] || 0;
                 if (now - lastCmdTime < cooldownMs) continue;
                 window.botUserCooldowns[username] = now;
-                if (now - spamTracker.lastTime > spamResetMs || command !== spamTracker.lastCmd) spamTracker.count = 1; else spamTracker.count++;
+                if (now - spamTracker.lastTime > spamResetMs || command !== spamTracker.lastCmd) { spamTracker.count = 1; } else { spamTracker.count++; }
                 spamTracker.lastCmd = command; spamTracker.lastTime = now;
                 if (spamTracker.count >= spamStrikeLimit) {
-                    spamTracker.penaltyUntil = now + spamTimeoutMs;
-                    spamTracker.count = 0;
+                    spamTracker.penaltyUntil = now + spamTimeoutMs; spamTracker.count = 0;
                     window.py_bot_events.push({ type: 'spam_detected', username: username, command: command });
                     continue;
                 }
@@ -166,8 +116,8 @@ UNIFIED_CLIENT_SCRIPT = """
     };
     const observer = new MutationObserver(callback);
     observer.observe(targetNode, { childList: true });
-    window.drednotBotMutationObserver = observer;
-    console.log('[Bot-JS] Advanced Spam Detection and WebSocket sender are now active.');
+    window.drednotBotMutationObserver = observer; // Store the observer instance
+    console.log('[Bot-JS] Advanced Spam Detection is now active.');
 """
 
 class InvalidKeyError(Exception): pass
@@ -191,9 +141,19 @@ def log_event(message):
 
 # --- BROWSER & FLASK SETUP ---
 def setup_driver():
+    """
+    THIS IS THE MODIFIED FUNCTION.
+    It now explicitly tells Selenium where to find the Chromium browser and its driver
+    inside the Docker container, preventing the 'Browser not found' error.
+    """
     logging.info("Launching headless browser for Docker environment...")
     chrome_options = Options()
+
+    # --- START OF CHANGE ---
+    # Explicitly set the path to the Chromium binary installed by 'apt-get' in the Dockerfile.
     chrome_options.binary_location = "/usr/bin/chromium"
+    # --- END OF CHANGE ---
+
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -204,7 +164,12 @@ def setup_driver():
     chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+
+    # --- START OF CHANGE ---
+    # Explicitly set the path to the chromedriver executable installed by 'apt-get'.
     service = Service(executable_path="/usr/bin/chromedriver")
+    # --- END OF CHANGE ---
+    
     return webdriver.Chrome(service=service, options=chrome_options)
 
 flask_app = Flask('')
@@ -218,9 +183,11 @@ def health_check():
     <p><span class="label">Current Ship ID:</span>{BOT_STATE['current_ship_id']}</p>
     <p><span class="label">Last Command:</span>{BOT_STATE['last_command_info']}</p>
     <p><span class="label">Last Message Sent:</span>{BOT_STATE['last_message_sent']}</p>
+    
     <form action="/update_commands" method="post">
         <button type="submit" class="btn">Refresh Commands Live</button>
     </form>
+
     <h2>Recent Events (Log)</h2><ul>{''.join(f'<li>{event}</li>' for event in BOT_STATE['event_log'])}</ul></div></body></html>
     """
     return Response(html, mimetype='text/html')
@@ -266,19 +233,17 @@ def message_processor_thread():
         try:
             with driver_lock:
                 if driver:
-                    success = driver.execute_script("return window.py_send_chat_ws(arguments[0]);", message)
-                    if success:
-                        clean_msg = message[1:] if message.startswith(ZWSP) else message
-                        logging.info(f"SENT (WS): {clean_msg}")
-                        BOT_STATE["last_message_sent"] = clean_msg
-                    else:
-                        logging.warning(f"Failed to send message via WebSocket: '{message}'")
-                        log_event("WARN: WebSocket send failed. Connection might be down.")
+                    driver.execute_script(
+                        "const msg=arguments[0];const chatBox=document.getElementById('chat');const chatInp=document.getElementById('chat-input');const chatBtn=document.getElementById('chat-send');if(chatBox&&chatBox.classList.contains('closed')){chatBtn.click();}if(chatInp){chatInp.value=msg;}chatBtn.click();",
+                        message
+                    )
+            clean_msg = message[1:]
+            logging.info(f"SENT: {clean_msg}")
+            BOT_STATE["last_message_sent"] = clean_msg
         except WebDriverException:
-            logging.warning("Message processor: WebDriver not available. Message dropped.")
+            logging.warning("Message processor: WebDriver not available.")
         except Exception as e:
             logging.error(f"Unexpected error in message processor: {e}")
-            traceback.print_exc()
         time.sleep(MESSAGE_DELAY_SECONDS)
 
 # --- COMMAND PROCESSING ---
@@ -307,13 +272,19 @@ def process_commands_list_call(username):
     try:
         queue_reply(f"@{username} Fetching command list from server...")
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
-        response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
+        response = requests.get(
+            endpoint_url,
+            headers={"x-api-key": API_KEY},
+            timeout=10
+        )
         response.raise_for_status()
         command_list = response.json() 
+
         queue_reply("--- Available In-Game Commands ---")
         for cmd_string in command_list:
             queue_reply(cmd_string)
         queue_reply("------------------------------------")
+
     except requests.exceptions.RequestException as e:
         logging.error(f"Failed to fetch command list: {e}")
         queue_reply(f"@{username} Sorry, couldn't fetch the command list. The server might be down.")
@@ -357,6 +328,7 @@ def attempt_soft_rejoin():
             logging.info("✅ Proactive rejoin successful!")
             log_event("Proactive rejoin successful.")
             BOT_STATE["status"] = "Running"
+            # After rejoining, re-inject the observer with the current command list
             queue_browser_update()
             reset_inactivity_timer()
     except Exception as e:
@@ -365,12 +337,14 @@ def attempt_soft_rejoin():
         if driver: driver.quit()
 
 def fetch_command_list():
+    """Fetches command list from server and updates the global variable. Returns success."""
     global SERVER_COMMAND_LIST
     try:
         log_event("Fetching command list from server...")
         endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
         response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
         response.raise_for_status()
+        
         full_command_strings = response.json()
         SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
         SERVER_COMMAND_LIST.append('verify')
@@ -381,11 +355,11 @@ def fetch_command_list():
         return False
 
 def queue_browser_update():
+    """Queues an action to re-inject the JS observer with the current command list."""
     def update_action(driver_instance):
-        log_event("Injecting/updating JS client...")
-        # Note: We don't need to re-inject msgpack on a simple update
+        log_event("Injecting/updating chat observer...")
         driver_instance.execute_script(
-            UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
         )
         queue_reply("Commands have been updated live.")
@@ -401,7 +375,7 @@ def start_bot(use_key_login):
     with driver_lock:
         logging.info(f"Navigating to invite link...")
         driver.get(SHIP_INVITE_LINK)
-        wait = WebDriverWait(driver, 30)
+        wait = WebDriverWait(driver, 15)
         
         try:
             btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal-container .btn-green")))
@@ -430,23 +404,19 @@ def start_bot(use_key_login):
             log_event("Login timeout; assuming in-game.")
         except Exception as e:
             log_event(f"Login failed critically: {e}")
-            raise
+            raise e
 
-        wait.until(EC.presence_of_element_located((By.ID, "chat-input")))
+        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
         
         if not fetch_command_list():
             raise RuntimeError("Initial command fetch failed. Cannot start bot.")
 
-        # === THE FIX: INJECT MSGPACK FIRST, THEN INJECT THE CLIENT SCRIPT ===
-        log_event("Injecting required msgpack library...")
-        driver.execute_script(MSGPACK_JS_LIBRARY)
-        
-        log_event("Injecting Unified JS Client (WS + Observer)...")
+        log_event("Injecting initial chat observer...")
         driver.execute_script(
-            UNIFIED_CLIENT_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
+            MUTATION_OBSERVER_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
             SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
         )
-        
+
         log_event("Proactively scanning for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
         found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
@@ -474,12 +444,13 @@ def start_bot(use_key_login):
                 raise RuntimeError(error_message)
 
     BOT_STATE["status"] = "Running"
-    queue_reply("Bot online. Now using WebSocket communication.")
+    queue_reply("Bot online.")
     reset_inactivity_timer()
     logging.info(f"Event-driven chat monitor active. Polling every {MAIN_LOOP_POLLING_INTERVAL_SECONDS}s.")
     
     while True:
         try:
+            # Check the action queue first
             try:
                 while not action_queue.empty():
                     action_to_run = action_queue.get_nowait()
@@ -517,41 +488,6 @@ def start_bot(use_key_login):
             logging.error(f"WebDriver exception in main loop. Assuming disconnect: {e.msg}")
             raise
         time.sleep(MAIN_LOOP_POLLING_INTERVAL_SECONDS)
-
-# --- MEMORY LEAK PREVENTION ---
-def cleanup_processes():
-    logging.info("Running cleanup task to find and kill zombie processes...")
-    killed_count = 0
-    target_processes = ['chrome', 'chromium', 'chromedriver']
-    
-    for proc in psutil.process_iter(['pid', 'name']):
-        try:
-            proc_name = proc.info['name'].lower()
-            if any(target in proc_name for target in target_processes):
-                logging.warning(f"Found lingering process: {proc.info['name']} (PID: {proc.info['pid']}). Terminating.")
-                p = psutil.Process(proc.info['pid'])
-                p.terminate()
-                killed_count += 1
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
-        except Exception as e:
-            logging.error(f"Error during process cleanup for PID {proc.info.get('pid', '?')}: {e}")
-
-    if killed_count > 0:
-        time.sleep(2)
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                proc_name = proc.info['name'].lower()
-                if any(target in proc_name for target in target_processes):
-                    logging.error(f"Process {proc.info['name']} (PID: {proc.info['pid']}) did not terminate gracefully. Killing forcefully.")
-                    psutil.Process(proc.info['pid']).kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-    
-    if killed_count > 0:
-        logging.info(f"Cleanup finished. Terminated {killed_count} lingering browser-related processes.")
-    else:
-        logging.info("Cleanup finished. No lingering processes found.")
 
 # --- MAIN EXECUTION ---
 def main():
@@ -595,12 +531,9 @@ def main():
             if driver:
                 try:
                     driver.quit()
-                except Exception as e:
-                    logging.warning(f"driver.quit() failed with an error: {e}")
+                except:
+                    pass
             driver = None
-            
-            cleanup_processes()
-            
             time.sleep(5)
 
 if __name__ == "__main__":
